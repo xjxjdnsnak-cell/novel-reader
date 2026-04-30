@@ -23,6 +23,8 @@ novel-reader/
   bin/novel-reader
   bin/novel-reader.cmd
   bin/novel-reader.ps1
+  bin/start-novel-reader.ps1
+  bin/start-web.ps1
   src/novel_reader/
 ```
 
@@ -31,7 +33,7 @@ The Python CLI is the shared core. Claude Code and OpenCode use thin adapters th
 ## Requirements
 
 - Python 3.9+
-- No required third-party Python packages
+- Flask 3.0+ for the optional local Web console
 - TXT/Markdown input files only in v0.1
 
 ## Quick Start
@@ -54,6 +56,132 @@ python ./bin/novel-reader style <book_id> --write
 ```
 
 Local data is stored under `.novel-reader/<book_id>/`.
+
+## One-Click Startup
+
+Use the launcher to check or start local Qwen Embedding and then start Claude Code or OpenCode with the right environment variables.
+
+```powershell
+.\bin\start-novel-reader.ps1
+```
+
+If Windows blocks PowerShell scripts, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\bin\start-novel-reader.ps1
+```
+
+Defaults:
+
+- client: `claude`
+- Claude permission mode: ask interactively between normal Claude and `claude --dangerously-skip-permissions`
+- embedding URL: `http://127.0.0.1:8081/v1`
+- model name: `qwen3-embedding-0.6b`
+- local config: `.novel-reader-local/config.json`
+
+Other examples:
+
+```powershell
+.\bin\start-novel-reader.ps1 -Client opencode
+.\bin\start-novel-reader.ps1 -Client none
+.\bin\start-novel-reader.ps1 -NoEmbedding
+.\bin\start-novel-reader.ps1 -ModelPath "C:\Users\xsjhxs\.cache\modelscope\hub\models\Qwen\Qwen3-Embedding-0.6B"
+.\bin\start-novel-reader.ps1 -Port 8081 -BatchSize 4
+.\bin\start-novel-reader.ps1 -ClaudePermissionMode normal
+.\bin\start-novel-reader.ps1 -ClaudePermissionMode dangerous
+```
+
+`-ClaudePermissionMode dangerous` starts `claude --dangerously-skip-permissions` only after you type `DANGEROUS` to confirm. Use it only in a trusted workspace.
+
+If the model is not found, the launcher asks for a model path. Press Enter to continue without embedding. Keyword search, plot Q&A, writing analysis, style distillation, and continuation packages still work without embedding.
+
+The launcher only connects to `127.0.0.1` by default. Do not put real API keys or private model paths in committed files.
+
+## Two Claude Modes
+
+Novel Reader supports two Claude Code workflows.
+
+Mode 1: start Claude in plugin mode from PowerShell:
+
+```powershell
+.\bin\start-claude-plugin.ps1
+.\bin\start-claude-plugin.ps1 -ClaudePermissionMode dangerous
+.\bin\start-claude-plugin.ps1 -ModelPath "C:\Users\xsjhxs\.cache\modelscope\hub\models\Qwen\Qwen3-Embedding-0.6B"
+```
+
+This checks or starts local Qwen Embedding, then opens Claude Code with the Novel Reader plugin available.
+
+Mode 2: open the Web panel from inside Claude Code:
+
+```text
+/novel-web
+/novel-web --port 8770
+/novel-web --no-embedding
+/novel-web --dangerous
+```
+
+The `/novel-web` command starts the local Web console in the background, opens the browser panel, and enables the Claude bridge for the page. If the requested port is busy, the launcher picks the next available local port and prints the final URL.
+
+## Local Web Console
+
+The Web console is a local browser UI for common work: import, book list, status, reading, search, plot Q&A evidence packages, outline/map/analyze, language style distillation, continuation packages, and embedding checks.
+
+Install the package or Flask first:
+
+```powershell
+pip install -e .
+```
+
+Then start the console:
+
+```powershell
+.\bin\start-web.ps1 -OpenBrowser
+```
+
+Open manually if needed:
+
+```text
+http://127.0.0.1:8765
+```
+
+Other examples:
+
+```powershell
+.\bin\start-web.ps1
+.\bin\start-web.ps1 -Port 8770 -OpenBrowser
+.\bin\start-web.ps1 -NoEmbedding
+.\bin\start-web.ps1 -ModelPath "C:\Users\xsjhxs\.cache\modelscope\hub\models\Qwen\Qwen3-Embedding-0.6B"
+.\bin\start-web.ps1 -EnableClaudeChat -OpenBrowser
+```
+
+The console only binds to `127.0.0.1` by default. If local Qwen Embedding is already running on `8081`, semantic features are enabled automatically. If it is not running, the launcher tries to start it from `-ModelPath`, `QWEN_EMBED_MODEL_PATH`, saved `.novel-reader-local/config.json`, or the common ModelScope cache path. If no model is found, the page still supports keyword search and all local evidence-package workflows.
+
+To start Qwen Embedding before opening the Web console:
+
+```powershell
+.\bin\start-novel-reader.ps1 -Client none
+.\bin\start-web.ps1 -OpenBrowser
+```
+
+Web document viewer:
+
+- The Documents tab lists generated `maps/`, `reports/`, `styles/`, `continuations/`, and `summaries/` files.
+- Markdown files can be previewed in the browser, viewed as source, or downloaded.
+- The web API refuses absolute paths and `..` traversal, so it cannot read arbitrary local files.
+
+Claude bridge:
+
+```powershell
+.\bin\start-web.ps1 -EnableClaudeChat -ClaudeMode both -OpenBrowser
+.\bin\start-web.ps1 -EnableClaudeChat -ClaudePermissionMode dangerous -OpenBrowser
+```
+
+The Claude tab calls the local `claude` CLI with fixed command templates:
+
+- one-shot mode: `claude -p --output-format json <prompt>`
+- continue mode: `claude -c -p --output-format json <prompt>`
+
+Dangerous mode adds `--dangerously-skip-permissions` only after the launcher asks you to type `DANGEROUS`. Attached documents and evidence packages may be sent through Claude Code, so keep the server bound to `127.0.0.1`.
 
 ## Continuation Packages
 
@@ -188,4 +316,3 @@ embed <book>                       Optional semantic index
 ## Privacy
 
 By default, the novel text stays on disk and is indexed locally. The only command that can call an external service is `embed`, and it requires explicit environment configuration. `style` and `continue` read the local index and emit short excerpts with source positions.
-

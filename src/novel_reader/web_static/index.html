@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Novel Reader Console</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">NR</div>
+          <div>
+            <h1>Novel Reader</h1>
+            <p>本地小说操作台</p>
+          </div>
+        </div>
+
+        <section class="panel compact">
+          <div class="panel-head">
+            <h2>书库</h2>
+            <button id="refreshBooks" class="icon-button" title="刷新">↻</button>
+          </div>
+          <div id="bookList" class="book-list"></div>
+        </section>
+
+        <section class="panel compact">
+          <h2>导入</h2>
+          <label>TXT/Markdown 路径</label>
+          <input id="ingestPath" type="text" placeholder="C:\path\book.txt" />
+          <div class="inline-grid">
+            <input id="ingestId" type="text" placeholder="book_id 可选" />
+            <label class="check-line"><input id="ingestForce" type="checkbox" /> 重建</label>
+          </div>
+          <button id="ingestBtn" class="primary">导入小说</button>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">当前书籍</div>
+            <h2 id="currentTitle">未选择</h2>
+          </div>
+          <div class="status-pills">
+            <span id="embeddingPill" class="pill neutral">Embedding 未检查</span>
+            <span id="claudePill" class="pill neutral">Claude 未检查</span>
+            <span id="coveragePill" class="pill neutral">覆盖率 --</span>
+          </div>
+        </header>
+
+        <nav class="tabs" aria-label="功能区">
+          <button class="tab active" data-tab="read">阅读</button>
+          <button class="tab" data-tab="search">检索问答</button>
+          <button class="tab" data-tab="reports">分析地图</button>
+          <button class="tab" data-tab="documents">文档</button>
+          <button class="tab" data-tab="style">风格</button>
+          <button class="tab" data-tab="continue">续写</button>
+          <button class="tab" data-tab="claude">Claude</button>
+          <button class="tab" data-tab="embedding">Embedding</button>
+        </nav>
+
+        <section id="tab-read" class="tab-panel active">
+          <div class="tool-grid two">
+            <section class="panel">
+              <h2>章节阅读</h2>
+              <div class="form-row">
+                <label>章节</label>
+                <input id="readChapter" type="number" min="1" value="1" />
+                <button id="readBtn" class="primary">读取</button>
+              </div>
+              <div class="form-row">
+                <label>Chunk</label>
+                <input id="readChunk" type="text" placeholder="c0012-003" />
+                <button id="readChunkBtn">读取块</button>
+              </div>
+            </section>
+            <section class="panel">
+              <h2>状态</h2>
+              <button id="statusBtn">刷新状态</button>
+              <pre id="statusBox" class="code-box compact-code"></pre>
+            </section>
+          </div>
+          <div id="readOutput" class="result-stack"></div>
+        </section>
+
+        <section id="tab-search" class="tab-panel">
+          <div class="tool-grid two">
+            <section class="panel">
+              <h2>检索</h2>
+              <textarea id="searchQuery" rows="3" placeholder="输入关键词或语义问题"></textarea>
+              <div class="form-row">
+                <label class="check-line"><input id="searchSemantic" type="checkbox" /> 语义</label>
+                <input id="searchTop" type="number" min="1" max="30" value="8" />
+                <button id="searchBtn" class="primary">搜索</button>
+              </div>
+            </section>
+            <section class="panel">
+              <h2>问答证据包</h2>
+              <textarea id="askQuestion" rows="3" placeholder="例如：这个伏笔在哪里回收？"></textarea>
+              <div class="form-row">
+                <label class="check-line"><input id="askSemantic" type="checkbox" /> 语义</label>
+                <button id="askBtn" class="primary">生成证据包</button>
+              </div>
+            </section>
+          </div>
+          <div id="searchOutput" class="result-stack"></div>
+        </section>
+
+        <section id="tab-reports" class="tab-panel">
+          <section class="panel">
+            <h2>分析与地图</h2>
+            <div class="button-row">
+              <button data-action="outline">生成情节梳理</button>
+              <button data-action="map">生成全书地图</button>
+              <button data-action="analyze">生成写作分析</button>
+            </div>
+          </section>
+          <div id="reportsOutput" class="result-stack"></div>
+        </section>
+
+        <section id="tab-documents" class="tab-panel">
+          <div class="document-layout">
+            <section class="panel document-sidebar">
+              <div class="panel-head">
+                <h2>文档</h2>
+                <button id="refreshDocs">刷新</button>
+              </div>
+              <div id="documentList" class="document-list"></div>
+            </section>
+            <section class="panel document-viewer">
+              <div class="panel-head">
+                <div>
+                  <h2 id="documentTitle">未选择文档</h2>
+                  <div id="documentMeta" class="result-meta"></div>
+                </div>
+                <div class="button-row tight">
+                  <button id="docPreviewBtn">预览</button>
+                  <button id="docSourceBtn">源码</button>
+                  <a id="docDownload" class="button-link" href="#" hidden>下载</a>
+                </div>
+              </div>
+              <div id="documentOutput" class="document-output"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="tab-style" class="tab-panel">
+          <section class="panel">
+            <h2>语言风格蒸馏</h2>
+            <div class="form-row">
+              <label>场景</label>
+              <select id="styleScene">
+                <option value="">全书</option>
+                <option>战斗</option>
+                <option>悬疑</option>
+                <option>感情</option>
+                <option>日常</option>
+                <option>说明</option>
+              </select>
+              <label class="check-line"><input id="styleWrite" type="checkbox" /> 写入文档</label>
+              <button id="styleBtn" class="primary">生成风格证据</button>
+            </div>
+          </section>
+          <div id="styleOutput" class="result-stack"></div>
+        </section>
+
+        <section id="tab-continue" class="tab-panel">
+          <section class="panel">
+            <h2>续写任务包</h2>
+            <div class="form-grid">
+              <label>从章节后<input id="contChapter" type="number" min="1" placeholder="12" /></label>
+              <label>或从 Chunk 后<input id="contChunk" type="text" placeholder="c0012-003" /></label>
+              <label>长度
+                <select id="contLength">
+                  <option value="short">short</option>
+                  <option value="medium" selected>medium</option>
+                  <option value="long">long</option>
+                </select>
+              </label>
+              <label>场景
+                <select id="contScene">
+                  <option value="">未指定</option>
+                  <option>战斗</option>
+                  <option>悬疑</option>
+                  <option>感情</option>
+                  <option>日常</option>
+                  <option>说明</option>
+                </select>
+              </label>
+            </div>
+            <label>续写大纲</label>
+            <textarea id="contOutline" rows="4" placeholder="写入你希望下一幕发生的事情"></textarea>
+            <div class="form-row">
+              <label class="check-line"><input id="contSemantic" type="checkbox" /> 语义证据</label>
+              <label class="check-line"><input id="contWrite" type="checkbox" /> 写入文件</label>
+              <button id="continueBtn" class="primary">生成任务包</button>
+            </div>
+          </section>
+          <div id="continueOutput" class="result-stack"></div>
+        </section>
+
+        <section id="tab-claude" class="tab-panel">
+          <div class="claude-layout">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>Claude</h2>
+                <button id="claudeStatusBtn">检查</button>
+              </div>
+              <pre id="claudeStatusBox" class="code-box compact-code"></pre>
+              <label>模式</label>
+              <select id="claudeMode">
+                <option value="once">独立调用</option>
+                <option value="continue">连续会话</option>
+              </select>
+              <div class="attach-list">
+                <label class="check-line"><input id="attachDocument" type="checkbox" checked /> 当前文档</label>
+                <label class="check-line"><input id="attachAsk" type="checkbox" /> 问答证据包</label>
+                <label class="check-line"><input id="attachStyle" type="checkbox" /> 风格证据包</label>
+                <label class="check-line"><input id="attachContinue" type="checkbox" /> 续写任务包</label>
+              </div>
+            </section>
+            <section class="panel chat-panel">
+              <div id="chatLog" class="chat-log"></div>
+              <textarea id="claudeMessage" rows="4" placeholder="把当前文档或证据包交给 Claude 处理"></textarea>
+              <div class="button-row">
+                <button id="sendClaudeBtn" class="primary">发送给 Claude</button>
+                <button id="clearChatBtn">清空</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="tab-embedding" class="tab-panel">
+          <div class="tool-grid two">
+            <section class="panel">
+              <h2>服务状态</h2>
+              <button id="healthBtn">检查服务</button>
+              <pre id="healthBox" class="code-box compact-code"></pre>
+            </section>
+            <section class="panel">
+              <h2>建立语义索引</h2>
+              <div class="form-row">
+                <label>Batch</label>
+                <input id="embedBatch" type="number" min="1" value="4" />
+                <label>Max chars</label>
+                <input id="embedMaxChars" type="number" min="200" value="1500" />
+              </div>
+              <button id="embedBtn" class="primary">开始 Embedding</button>
+            </section>
+          </div>
+          <div id="embeddingOutput" class="result-stack"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

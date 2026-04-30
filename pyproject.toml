@@ -3,12 +3,14 @@ name = "novel-reader"
 version = "0.1.0"
 description = "Claude Code and OpenCode compatible toolkit for reading million-word TXT/Markdown novels."
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "flask>=3.0",
+]
 
 [project.scripts]
 novel-reader = "novel_reader.cli:main"
+novel-reader-web = "novel_reader.web_app:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
-
