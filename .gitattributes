@@ -1,0 +1,9 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.ts text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+bin/novel-reader text eol=lf

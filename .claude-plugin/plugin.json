@@ -1,0 +1,8 @@
+{
+  "name": "novel-reader",
+  "version": "0.1.0",
+  "description": "Read, outline, ask about, analyze, distill style, and build continuation packages from million-word TXT/Markdown novels with a local index.",
+  "author": {
+    "name": "Codex"
+  }
+}
