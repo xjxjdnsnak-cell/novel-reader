@@ -1,75 +1,87 @@
 ---
 name: novel-reader
-description: Read, outline, ask about, analyze, distill language style, and build continuation packages from complete long TXT/Markdown novels with a local index and source-grounded evidence.
+description: 使用 novel-reader 工具阅读和分析长篇小说的统一技能。
 compatibility: opencode
 ---
 
-# Novel Reader
+# Novel Reader 统一技能
 
-Use this skill when a novel is too large for a single model context window. The bundled CLI splits TXT/Markdown novels into chapters and chunks, builds a local SQLite index, tracks chapter-summary coverage, and prepares evidence packets for plot Q&A.
+使用此技能阅读完整的长篇小说，特别是超出单次上下文窗口的 TXT/Markdown 作品。
 
-## Rules
+## 核心规则
 
-- Default to Chinese output.
-- Do not say the whole novel is fully read unless `novel-reader status` shows 100% summary coverage.
-- For plot Q&A, call `/novel-ask` or run `python ./bin/novel-reader ask ...` before answering.
-- Use chunk IDs, chapter numbers, and line ranges for factual claims.
-- If evidence is thin or coverage is incomplete, state that clearly.
-- Embedding is optional and opt-in; do not send text to an external service unless the user configured it.
-- Style distillation must produce an original-writing transfer guide, not direct imitation instructions for a specific author.
-- Continuation writing must start from a `/novel-continue` package, not from memory alone.
+- 默认使用中文输出，除非用户明确要求其他语言
+- 除非 `novel-reader status` 显示 100% 摘要覆盖率，否则不要声称已完全阅读整本书
+- 对于事实性剧情问题，先使用 `novel-reader do <book_id> "<问题>"` 获取证据，再回答
+- 语言风格提炼应提供原创写作迁移指南，而不是直接模仿特定作者的提示词
+- 续写前必须先使用 `novel-reader write-next` 构建任务包，不能仅凭记忆续写
 
-## Workflow
+## 快速开始
 
-1. Import the book with `/novel-ingest path/to/book.txt`.
-2. Check progress with `/novel-status <book_id>`.
-3. Read chapters with `python ./bin/novel-reader read <book_id> --chapter N`.
-4. After each chapter, record a summary with `python ./bin/novel-reader note <book_id> --chapter N --text "<summary>"`.
-5. Generate durable artifacts with `/novel-outline <book_id> --write`, `/novel-map <book_id>`, and `/novel-analyze <book_id>`.
-6. Distill language style with `/novel-style <book_id>` or `/novel-style <book_id> --scene 战斗`.
-7. Build continuation packages with `/novel-continue <book_id> --after-chapter 12 --outline "..."`.
+### 首次设置
 
-## Summary Shape
+导入书籍：
 
-```markdown
-## 第 N 章：标题
-- 事件：
-- 人物与动机：
-- 冲突：
-- 情节因果：
-- 伏笔/回收：
-- 设定/地点/势力：
-- 时间线：
-- 写作观察：
-- 证据块：
+```bash
+python ./bin/novel-reader ingest path/to/book.txt
 ```
 
-## Answer Shape
+该命令会打印一个 `book_id`，后续所有命令都使用该 ID。
 
-For plot questions, answer with:
+### 日常使用（统一入口）
 
-- direct answer
-- evidence list with chapter/chunk/line references
-- uncertainty note if the relevant chapters are not fully covered
-- suggested next reads or searches when needed
+日常操作使用 `do` 命令，通过自然语言描述需求：
 
-## Style Distillation
+```bash
+python ./bin/novel-reader do <book_id> "你的自然语言需求"
+```
 
-For language style requests:
+**常见场景示例**：
 
-- run `/novel-style <book_id>` for full-book style evidence
-- run `/novel-style <book_id> --scene 战斗` for a scene-specific guide
-- cite chunk, chapter, and line references
-- include language profile, scene style, original-writing transfer guide, and forbidden list
-- do not reuse source excerpts as new prose and do not generate "write like this author" prompts
+```bash
+# 查看阅读进度
+python ./bin/novel-reader do <book_id> "这本书现在读到哪了"
 
-## Continuation Writing
+# 阅读特定章节
+python ./bin/novel-reader do <book_id> "读第3章"
 
-For continuation requests:
+# 搜索内容
+python ./bin/novel-reader do <book_id> "搜索主角"
 
-- run `/novel-continue <book_id> --after-chapter N` or `/novel-continue <book_id> --after-chunk c0001-001`
-- combine with `--outline "用户给的新剧情大纲"` when the user provides a direction
-- use `recent_context`, `plot_evidence`, `style_evidence`, and `constraints` before writing
-- follow `constraints.hard`; treat inferred constraints as guidance and uncertain constraints as warnings
-- after the continuation prose, output the self-checklist
-- do not copy source sentences or generate direct author-imitation instructions
+# 提问剧情问题
+python ./bin/novel-reader do <book_id> "主角为什么背叛组织"
+
+# 梳理剧情
+python ./bin/novel-reader do <book_id> "梳理剧情大纲"
+
+# 分析写作风格（特定场景）
+python ./bin/novel-reader do <book_id> "帮我分析战斗场景怎么写"
+
+# 续写
+python ./bin/novel-reader do <book_id> "接第12章后面续写，短一点，偏悬疑"
+```
+
+### 高级：续写任务
+
+对于正式的续写任务，使用专门的 `write-next` 命令：
+
+```bash
+python ./bin/novel-reader write-next <book_id> --after-chapter 12 --outline "主角潜入北塔"
+```
+
+## 当 do 命令失败时
+
+如果 `do` 命令无法正确识别意图，可以使用底层命令。底层命令包括：
+
+```bash
+novel-reader status <book_id>
+novel-reader read <book_id> --chapter 3
+novel-reader search <book_id> "关键词"
+novel-reader ask <book_id> "问题"
+novel-reader outline <book_id>
+novel-reader map <book_id>
+novel-reader analyze <book_id>
+novel-reader style <book_id>
+novel-reader continue <book_id> --after-chapter 12
+novel-reader embed <book_id>
+```

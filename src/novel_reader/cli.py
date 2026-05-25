@@ -19,6 +19,21 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+from novel_reader.intent_router import (
+    classify_request,
+    INTENT_STATUS,
+    INTENT_READ,
+    INTENT_SEARCH,
+    INTENT_ASK,
+    INTENT_OUTLINE,
+    INTENT_MAP,
+    INTENT_ANALYZE,
+    INTENT_STYLE,
+    INTENT_CONTINUE,
+    INTENT_EMBED,
+    INTENT_UNKNOWN,
+)
+
 
 DEFAULT_CHUNK_CHARS = 6000
 DEFAULT_OVERLAP_CHARS = 400
@@ -1900,7 +1915,164 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=command_embed)
 
+    p = sub.add_parser("do", help="自然语言统一入口：根据请求自动识别意图并调用对应命令。")
+    p.add_argument("book")
+    p.add_argument("request")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--semantic", action="store_true")
+    p.add_argument("--write", action="store_true")
+    p.add_argument("--after-chapter", type=int)
+    p.add_argument("--after-chunk")
+    p.add_argument("--scene", choices=STYLE_SCENES)
+    p.add_argument("--length", choices=tuple(CONTINUATION_LENGTHS))
+    p.add_argument("--top", type=int)
+    p.set_defaults(func=command_do)
+
+    p = sub.add_parser("write-next", help="生成续写任务包和 prose_generation_prompt，供 agent 使用。")
+    p.add_argument("book")
+    anchor = p.add_mutually_exclusive_group()
+    anchor.add_argument("--after-chapter", type=int)
+    anchor.add_argument("--after-chunk")
+    outline = p.add_mutually_exclusive_group()
+    outline.add_argument("--outline")
+    outline.add_argument("--outline-file")
+    p.add_argument("--scene", choices=STYLE_SCENES)
+    p.add_argument("--length", choices=tuple(CONTINUATION_LENGTHS), default="medium")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=command_write_next)
+
     return parser
+
+
+def command_do(args: argparse.Namespace) -> int:
+    intent_result = classify_request(args.request)
+    if args.json:
+        print_json({
+            "intent": intent_result.intent,
+            "confidence": intent_result.confidence,
+            "reason": intent_result.reason,
+            "suggested_args": intent_result.suggested_args,
+        })
+
+    root = storage_root(args)
+    # 构建新的 args 对象以调用现有命令
+    new_args = argparse.Namespace()
+    new_args.store = args.store
+    new_args.book = args.book
+
+    if intent_result.intent == INTENT_STATUS:
+        new_args.json = args.json
+        return command_status(new_args)
+    elif intent_result.intent == INTENT_READ:
+        new_args.json = args.json
+        if "chapter" in intent_result.suggested_args:
+            new_args.chapter = intent_result.suggested_args["chapter"]
+            new_args.chunk = None
+        elif "chunk" in intent_result.suggested_args:
+            new_args.chunk = intent_result.suggested_args["chunk"]
+            new_args.chapter = None
+        else:
+            # 默认看第 1 章
+            new_args.chapter = 1
+            new_args.chunk = None
+        new_args.limit_chars = None
+        return command_read(new_args)
+    elif intent_result.intent == INTENT_SEARCH:
+        new_args.query = intent_result.suggested_args.get("query", args.request)
+        new_args.top = args.top or 8
+        new_args.context_chars = 360
+        new_args.semantic = args.semantic
+        new_args.json = args.json
+        return command_search(new_args)
+    elif intent_result.intent == INTENT_ASK:
+        new_args.question = intent_result.suggested_args.get("question", args.request)
+        new_args.top = args.top or 8
+        new_args.context_chars = 500
+        new_args.semantic = args.semantic
+        new_args.json = args.json
+        return command_ask(new_args)
+    elif intent_result.intent == INTENT_OUTLINE:
+        new_args.write = args.write or intent_result.suggested_args.get("write", False)
+        return command_outline(new_args)
+    elif intent_result.intent == INTENT_MAP:
+        return command_map(new_args)
+    elif intent_result.intent == INTENT_ANALYZE:
+        return command_analyze(new_args)
+    elif intent_result.intent == INTENT_STYLE:
+        new_args.scene = intent_result.suggested_args.get("scene", args.scene)
+        new_args.write = args.write
+        new_args.json = args.json
+        return command_style(new_args)
+    elif intent_result.intent == INTENT_CONTINUE:
+        new_args.after_chapter = intent_result.suggested_args.get("after_chapter", args.after_chapter)
+        new_args.after_chunk = intent_result.suggested_args.get("after_chunk", args.after_chunk)
+        new_args.outline = args.outline
+        new_args.outline_file = args.outline_file
+        new_args.semantic = args.semantic
+        new_args.scene = intent_result.suggested_args.get("scene", args.scene)
+        new_args.length = intent_result.suggested_args.get("length", args.length) or "medium"
+        new_args.context_chunks = 5
+        new_args.evidence_top = 8
+        new_args.write = args.write
+        new_args.json = args.json
+        return command_continue(new_args)
+    elif intent_result.intent == INTENT_EMBED:
+        new_args.provider = "openai-compatible"
+        new_args.model = None
+        new_args.batch_size = 16
+        new_args.max_chars = 2500
+        new_args.limit = None
+        new_args.quiet = False
+        return command_embed(new_args)
+    else:
+        print(f"无法识别您的需求意图。请尝试使用更明确的关键词，或使用底层命令。"
+              f"\n可用意图：status/read/search/ask/outline/map/analyze/style/continue/embed"
+              f"\n识别结果：{intent_result.intent} (置信度: {intent_result.confidence})"
+              f"\n原因：{intent_result.reason}")
+        return 1
+
+
+def command_write_next(args: argparse.Namespace) -> int:
+    if args.scene and args.scene not in STYLE_SCENES:
+        raise NovelReaderError("--scene 只支持：战斗、悬疑、感情、日常、说明。")
+    if args.length not in CONTINUATION_LENGTHS:
+        raise NovelReaderError(f"--length 只支持：{', '.join(CONTINUATION_LENGTHS)}")
+
+    root = storage_root(args)
+    packet = build_continuation_packet(root, args)
+
+    prose_generation_prompt = f"""
+# 续写任务 - {packet['book']['title']}
+
+## 任务说明
+请根据下方提供的续写任务包，撰写原创的续章节选。
+
+## 续写目标
+- 锚点：{packet['continuation_goal']['anchor_chunk']} / 第 {packet['continuation_goal']['anchor_chapter']} 章：{packet['continuation_goal']['anchor_chapter_title']}
+- 目标长度：{packet['continuation_goal']['target_length']}（{packet['continuation_goal']['target_length_hint']}）
+- 场景：{packet['continuation_goal']['scene'] or '未指定'}
+{f"- 用户大纲：{packet['continuation_goal']['outline']}" if packet['continuation_goal']['outline'] else ""}
+
+## 重要约束
+{' '.join(packet['constraints']['copyright_boundary'])}
+
+## 自检清单
+{' '.join([f'- {item}' for item in packet['self_checklist']])}
+    """.strip()
+
+    output = {
+        "continuation_package": packet,
+        "prose_generation_prompt": prose_generation_prompt,
+    }
+
+    if args.json:
+        print_json(output)
+    else:
+        print(prose_generation_prompt)
+        print("\n---\n")
+        print("完整 continuation_package 已包含在 JSON 输出中，使用 --json 查看。")
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

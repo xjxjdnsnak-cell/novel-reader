@@ -1,183 +1,92 @@
 ---
 name: novel-reader
-description: Use this skill when the user wants Claude Code to read a complete long novel, especially TXT/Markdown works that are too large for one context window, then produce plot outlines, plot Q&A, book maps, writing analysis, language style distillation, or continuation writing packages with source evidence.
+description: 使用 novel-reader 工具阅读和分析长篇小说的统一技能。
 ---
 
-# Novel Reader
+# Novel Reader 统一技能
 
-Use this skill to handle complete long-form novels without pretending that the whole book fits in one context window. The plugin provides a local CLI named `novel-reader` that indexes TXT/Markdown novels into chapters and chunks, tracks chapter-summary coverage, and returns source-grounded evidence for plot questions.
+使用此技能阅读完整的长篇小说，特别是超出单次上下文窗口的 TXT/Markdown 作品。
 
-## Core Rules
+## 核心规则
 
-- Default to Chinese output unless the user asks otherwise.
-- Never claim the full novel has been read unless `novel-reader status` shows 100% summary coverage.
-- For factual plot Q&A, use `novel-reader ask` or `novel-reader search` first, then answer with chapter, chunk, and line references.
-- If a question involves unread chapters, say the reading coverage is incomplete and read or ask the user to authorize reading the relevant chapters before giving a firm answer.
-- Treat generated maps and reports as working artifacts. Important claims still need source chunks.
-- Do not upload novel text. Embedding is optional and must only be used when the user has explicitly configured it.
-- For language style distillation, produce an original-writing transfer guide, not a prompt to imitate a specific living author.
-- For continuation writing, first build a continuation package with `novel-reader continue`; do not continue from memory alone.
+- 默认使用中文输出，除非用户明确要求其他语言
+- 除非 `novel-reader status` 显示 100% 摘要覆盖率，否则不要声称已完全阅读整本书
+- 对于事实性剧情问题，先使用 `novel-reader do <book_id> "<问题>"` 获取证据，再回答
+- 语言风格提炼应提供原创写作迁移指南，而不是直接模仿特定作者的提示词
+- 续写前必须先使用 `novel-reader write-next` 构建任务包，不能仅凭记忆续写
 
-## First-Time Setup
+## 快速开始
 
-From the plugin root, use the bundled wrapper:
+### 首次设置
+
+从插件根目录使用内置包装器：
 
 ```bash
 python ./bin/novel-reader ingest path/to/book.txt
 ```
 
-The command prints a `book_id`. Use that id for all later commands. If the Python package is installed, `novel-reader ingest path/to/book.txt` is also fine.
+该命令会打印一个 `book_id`，后续所有命令都使用该 ID。
 
-## Full Reading Workflow
+### 日常使用（统一入口）
 
-1. Run `novel-reader status <book_id>` to inspect chapter count, chunk count, and summary coverage.
-2. Read chapters in order with `novel-reader read <book_id> --chapter N`.
-3. After reading a chapter, write a structured summary with:
+日常操作使用 `do` 命令，通过自然语言描述需求：
 
 ```bash
-novel-reader note <book_id> --chapter N --text "<summary>"
+python ./bin/novel-reader do <book_id> "你的自然语言需求"
 ```
 
-Use this summary shape:
-
-```markdown
-## 第 N 章：标题
-- 事件：
-- 人物与动机：
-- 冲突：
-- 情节因果：
-- 伏笔/回收：
-- 设定/地点/势力：
-- 时间线：
-- 写作观察：
-- 证据块：
-```
-
-4. Repeat until `status` reports 100% coverage.
-5. Generate durable artifacts:
+**常见场景示例**：
 
 ```bash
-novel-reader outline <book_id> --write
-novel-reader map <book_id>
-novel-reader analyze <book_id>
+# 查看阅读进度
+python ./bin/novel-reader do <book_id> "这本书现在读到哪了"
+
+# 阅读特定章节
+python ./bin/novel-reader do <book_id> "读第3章"
+
+# 搜索内容
+python ./bin/novel-reader do <book_id> "搜索主角"
+
+# 提问剧情问题
+python ./bin/novel-reader do <book_id> "主角为什么背叛组织"
+
+# 梳理剧情
+python ./bin/novel-reader do <book_id> "梳理剧情大纲"
+
+# 分析写作风格（特定场景）
+python ./bin/novel-reader do <book_id> "帮我分析战斗场景怎么写"
+
+# 续写
+python ./bin/novel-reader do <book_id> "接第12章后面续写，短一点，偏悬疑"
 ```
 
-## Plot Outline
+### 高级：续写任务
 
-For "梳理剧情", "按章节整理", "主线支线", or "时间线" requests:
-
-1. Check coverage with `status`.
-2. Use `outline` and `map` if summaries exist.
-3. If summaries are missing, read the needed chapters and record notes before producing a whole-book outline.
-4. Separate confirmed plot facts from interpretation.
-
-## Plot Q&A
-
-For "为什么", "谁做了什么", "伏笔在哪里", "某情节是否矛盾", or other factual plot questions:
-
-1. Run:
+对于正式的续写任务，使用专门的 `write-next` 命令：
 
 ```bash
-novel-reader ask <book_id> "<question>"
+python ./bin/novel-reader write-next <book_id> --after-chapter 12 --outline "主角潜入北塔"
 ```
 
-2. Read any high-value chunks if the evidence snippets are too short:
+## 当 do 命令失败时
 
-```bash
-novel-reader read <book_id> --chunk c0001-001
-```
-
-3. Answer with:
-
-- short direct answer
-- supporting evidence with chapter/chunk/line references
-- uncertainty or missing-reading warning if evidence is insufficient
-
-## Writing Analysis
-
-For writing craft requests:
-
-1. Prefer full coverage before final diagnosis.
-2. Use `novel-reader analyze <book_id>` as the report scaffold.
-3. Evaluate plot structure, pacing, conflict density, character arcs, promise/payoff, foreshadowing, setting consistency, and revision priority.
-4. Tie major claims to source chunks or chapter summaries.
-
-## Language Style Distillation
-
-For "蒸馏文风", "语言风格", "转写指南", "场景写法", or "统一文风" requests:
-
-1. Check coverage:
+如果 `do` 命令无法正确识别意图，可以使用底层命令。底层命令包括：
 
 ```bash
 novel-reader status <book_id>
+novel-reader read <book_id> --chapter 3
+novel-reader search <book_id> "关键词"
+novel-reader ask <book_id> "问题"
+novel-reader outline <book_id>
+novel-reader map <book_id>
+novel-reader analyze <book_id>
+novel-reader style <book_id>
+novel-reader continue <book_id> --after-chapter 12
+novel-reader embed <book_id>
 ```
 
-2. Build a structured evidence packet:
+## 注意事项
 
-```bash
-novel-reader style <book_id> --json
-```
-
-For one scene type:
-
-```bash
-novel-reader style <book_id> --scene 战斗 --json
-```
-
-3. When the user wants artifacts, write them locally:
-
-```bash
-novel-reader style <book_id> --write
-```
-
-4. Output four sections:
-
-- language style profile: narrative distance, sentence rhythm, paragraph density, punctuation, imagery, emotional register, dialogue function
-- scene style guide: battle, suspense, emotion, daily life, exposition, or the requested scene
-- original-writing transfer guide: reusable craft moves for new characters, new settings, and new wording
-- forbidden list: do not copy source sentences, unique metaphors, proper nouns, recognizable scenes, or produce "write like this author" instructions
-
-Use only short excerpts from the evidence packet and always cite chapter, chunk, and line references.
-
-## Continuation Writing
-
-For "续写", "接着写", "按大纲写下一章", or "延续当前剧情" requests:
-
-1. Build a continuation package before writing prose:
-
-```bash
-novel-reader continue <book_id> --after-chapter N --json
-```
-
-Useful variants:
-
-```bash
-novel-reader continue <book_id> --after-chunk c0001-001 --json
-novel-reader continue <book_id> --after-chapter N --outline "用户给的新剧情大纲" --json
-novel-reader continue <book_id> --outline-file next-arc.md --scene 悬疑 --semantic --json
-```
-
-2. Read the package sections in order: `recent_context`, `plot_evidence`, `style_evidence`, `constraints`, `draft_instructions`, `self_checklist`.
-3. Write original continuation prose only after the package is available.
-4. Follow `constraints.hard`; treat `constraints.inferred` as guidance and `constraints.uncertain` as risk notes.
-5. After the prose, output the self-checklist and note any unresolved risk.
-
-Continuation prose must preserve continuity and abstract style traits, but must not copy source sentences, unique metaphors, proper nouns as substitutes for new invention, or recognizable passages.
-
-## Optional Embedding
-
-Keyword/FTS search works locally by default. To enable semantic search, the user must set:
-
-```bash
-NOVEL_READER_EMBED_API_KEY
-NOVEL_READER_EMBED_BASE_URL
-NOVEL_READER_EMBED_MODEL
-```
-
-Then run:
-
-```bash
-novel-reader embed <book_id> --provider openai-compatible
-```
-
-Only use `--semantic` after embedding has been built.
+- `do` 命令会自动识别意图，但对于复杂需求，建议结合显式参数使用
+- 使用 `--json` 标志获取结构化输出
+- 对于语义搜索，先使用 `novel-reader embed` 建立向量索引，再使用 `--semantic`

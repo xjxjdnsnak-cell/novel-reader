@@ -38,6 +38,22 @@ The Python CLI is the shared core. Claude Code and OpenCode use thin adapters th
 
 ## Quick Start
 
+### 普通用户（推荐使用统一入口）
+
+```bash
+# 1. 导入小说
+python ./bin/novel-reader ingest path/to/novel.txt
+
+# 2. 使用自然语言统一入口处理所有需求
+python ./bin/novel-reader do <book_id> "这本书现在读到哪了"
+python ./bin/novel-reader do <book_id> "读第3章"
+python ./bin/novel-reader do <book_id> "搜索主角"
+python ./bin/novel-reader do <book_id> "帮我分析战斗场景怎么写"
+python ./bin/novel-reader do <book_id> "接第12章后面续写，短一点，偏悬疑"
+```
+
+### 高级用户（使用底层命令）
+
 ```bash
 python ./bin/novel-reader ingest path/to/novel.txt
 python ./bin/novel-reader status <book_id>
@@ -183,9 +199,45 @@ The Claude tab calls the local `claude` CLI with fixed command templates:
 
 Dangerous mode adds `--dangerously-skip-permissions` only after the launcher asks you to type `DANGEROUS`. Attached documents and evidence packages may be sent through Claude Code, so keep the server bound to `127.0.0.1`.
 
+## 自然语言统一入口（推荐）
+
+`do` 命令允许用户通过自然语言描述需求，系统会自动识别意图并调用相应的底层命令。
+
+```bash
+python ./bin/novel-reader do <book_id> "这本书现在读到哪了"
+python ./bin/novel-reader do <book_id> "读第3章"
+python ./bin/novel-reader do <book_id> "搜索主角"
+python ./bin/novel-reader do <book_id> "主角为什么背叛组织"
+python ./bin/novel-reader do <book_id> "梳理剧情大纲"
+python ./bin/novel-reader do <book_id> "帮我分析战斗场景怎么写"
+python ./bin/novel-reader do <book_id> "接第12章后面续写，短一点，偏悬疑"
+```
+
+`do` 命令支持以下可选参数：
+- `--json`: 输出结构化 JSON
+- `--semantic`: 启用语义搜索（需要先建立 embedding 索引）
+- `--write`: 写入文件
+- `--after-chapter <N>`: 指定续写章节
+- `--after-chunk <chunk_id>`: 指定续写块
+- `--scene <scene_type>`: 指定场景类型（战斗/悬疑/感情/日常/说明）
+- `--length <short|medium|long>`: 指定续写长度
+- `--top <N>`: 限制检索结果数量
+
+## 续写任务高级命令
+
+`write-next` 是专门为 agent 设计的续写命令，它会生成完整的 continuation package 和 prose_generation_prompt。
+
+```bash
+python ./bin/novel-reader write-next <book_id> --after-chapter 12 --outline "主角潜入北塔" --json
+```
+
+输出包含：
+- `continuation_package`: 完整的续写任务包
+- `prose_generation_prompt`: 供 agent 使用的写作提示词
+
 ## Continuation Packages
 
-`continue` builds a continuation task package. It does not generate prose by itself.
+`continue` builds a continuation writing package. It does not generate prose by itself.
 
 ```bash
 python ./bin/novel-reader continue <book_id> --after-chapter 12 --json
