@@ -3,7 +3,16 @@ from pathlib import Path
 
 from novel_reader.web_app import make_app
 
-from test_reading_session import import_book, valid_l1_note
+from test_reading_session import import_book, load_json, run_cli, valid_l1_note, valid_l2_note
+
+
+def complete_session_notes(store: Path, session: dict) -> None:
+    for chapter in range(1, 5):
+        packet = load_json(run_cli(store, "read-next", session["session_id"], "--chapter", str(chapter), "--json"))
+        chunks = [item["chunk_id"] for item in packet["chapters"][0]["chunks"]]
+        required = packet["chapters"][0]["required_level"]
+        note = valid_l2_note(chunks) if required == "L2_READ" else valid_l1_note(chunks[0])
+        run_cli(store, "submit-note", session["session_id"], "--chapter", str(chapter), "--text", note, "--json")
 
 
 def test_web_reading_session_flow(tmp_path: Path, monkeypatch):
@@ -51,3 +60,75 @@ def test_web_reading_session_flow(tmp_path: Path, monkeypatch):
     assert finalized.get_json()["ok"] is False
 
     assert os.environ["NOVEL_READER_HOME"] == str(store)
+
+
+def test_web_old_action_analyze_uses_full_scope_guard(tmp_path: Path, monkeypatch):
+    store, book = import_book(tmp_path)
+    monkeypatch.setenv("NOVEL_READER_HOME", str(store))
+    monkeypatch.setenv("NOVEL_READER_WEB_TOKEN", "test-token")
+    session = load_json(run_cli(store, "read-session", book, "--mode", "balanced", "--deep-ratio", "0.5", "--json"))
+    complete_session_notes(store, session)
+    app = make_app()
+    client = app.test_client()
+    headers = {"X-Novel-Reader-Token": "test-token"}
+
+    blocked = client.post(
+        "/api/action/analyze",
+        json={"book": book, "scope": "full", "session_id": session["session_id"]},
+        headers=headers,
+    )
+    assert blocked.status_code == 400
+    payload = blocked.get_json()
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "FULL_SCOPE_NOT_ALLOWED"
+
+    partial = client.post("/api/action/analyze", json={"book": book}, headers=headers)
+    assert partial.status_code == 200
+    assert partial.get_json()["ok"] is True
+
+
+def test_web_style_uses_full_scope_guard(tmp_path: Path, monkeypatch):
+    store, book = import_book(tmp_path)
+    monkeypatch.setenv("NOVEL_READER_HOME", str(store))
+    monkeypatch.setenv("NOVEL_READER_WEB_TOKEN", "test-token")
+    session = load_json(run_cli(store, "read-session", book, "--mode", "balanced", "--deep-ratio", "0.5", "--json"))
+    complete_session_notes(store, session)
+    app = make_app()
+    client = app.test_client()
+    headers = {"X-Novel-Reader-Token": "test-token"}
+
+    blocked = client.post(
+        "/api/style",
+        json={"book": book, "scope": "full", "session_id": session["session_id"], "json": True},
+        headers=headers,
+    )
+    assert blocked.status_code == 400
+    assert blocked.get_json()["error"]["code"] == "FULL_SCOPE_NOT_ALLOWED"
+
+    partial = client.post("/api/style", json={"book": book, "json": True}, headers=headers)
+    assert partial.status_code == 200
+    assert partial.get_json()["ok"] is True
+
+
+def test_web_continue_uses_full_scope_guard(tmp_path: Path, monkeypatch):
+    store, book = import_book(tmp_path)
+    monkeypatch.setenv("NOVEL_READER_HOME", str(store))
+    monkeypatch.setenv("NOVEL_READER_WEB_TOKEN", "test-token")
+    session = load_json(run_cli(store, "read-session", book, "--mode", "deep", "--after-chapter", "3", "--json"))
+    app = make_app()
+    client = app.test_client()
+    headers = {"X-Novel-Reader-Token": "test-token"}
+
+    blocked = client.post(
+        "/api/continue",
+        json={"book": book, "after_chapter": 3, "scope": "full", "session_id": session["session_id"]},
+        headers=headers,
+    )
+    assert blocked.status_code == 400
+    payload = blocked.get_json()
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "FULL_SCOPE_NOT_ALLOWED"
+
+    partial = client.post("/api/continue", json={"book": book, "after_chapter": 3}, headers=headers)
+    assert partial.status_code == 200
+    assert partial.get_json()["ok"] is True

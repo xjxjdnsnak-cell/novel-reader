@@ -141,12 +141,37 @@ def make_app() -> Flask:
     def api_action(action: str):
         payload = request_json()
         book = required_payload(payload, "book")
+        scope = validate_scope(payload.get("scope") or "partial")
+        allow_unfinalized = bool(payload.get("allow_unfinalized"))
+        session_id = payload.get("session_id") or None
         if action == "outline":
-            data = run_command_json(cli.command_outline, book=book, write=True)
+            data = run_command_json(
+                cli.command_outline,
+                book=book,
+                write=True,
+                json=True,
+                scope=scope,
+                allow_unfinalized=allow_unfinalized,
+                session_id=session_id,
+            )
         elif action == "map":
-            data = run_command_json(cli.command_map, book=book)
+            data = run_command_json(
+                cli.command_map,
+                book=book,
+                json=True,
+                scope=scope,
+                allow_unfinalized=allow_unfinalized,
+                session_id=session_id,
+            )
         elif action == "analyze":
-            data = run_command_json(cli.command_analyze, book=book)
+            data = run_command_json(
+                cli.command_analyze,
+                book=book,
+                json=True,
+                scope=scope,
+                allow_unfinalized=allow_unfinalized,
+                session_id=session_id,
+            )
         else:
             raise cli.NovelReaderError(f"未知操作：{action}")
         return ok(with_document_refs(book, data))
@@ -156,12 +181,17 @@ def make_app() -> Flask:
         payload = request_json()
         book = required_payload(payload, "book")
         scene = validate_scene(payload.get("scene") or None)
-        packet = cli.build_style_packet(cli.storage_root(namespace()), book, scene)
-        if bool(payload.get("write")):
-            write_result = run_command_json(cli.command_style, book=book, scene=scene, write=True, json=False)
-            packet["output_paths"] = write_result.get("paths", [])
-            packet = with_document_refs(book, packet)
-        return ok(packet)
+        packet = run_command_json(
+            cli.command_style,
+            book=book,
+            scene=scene,
+            write=bool(payload.get("write")),
+            json=bool(payload.get("json", True)),
+            scope=validate_scope(payload.get("scope") or "partial"),
+            allow_unfinalized=bool(payload.get("allow_unfinalized")),
+            session_id=payload.get("session_id") or None,
+        )
+        return ok(with_document_refs(book, packet))
 
     @app.post("/api/continue")
     def api_continue():
@@ -179,12 +209,12 @@ def make_app() -> Flask:
             evidence_top=int(payload.get("evidence_top") or 8),
             write=bool(payload.get("write")),
             json=True,
+            scope=validate_scope(payload.get("scope") or "partial"),
+            allow_unfinalized=bool(payload.get("allow_unfinalized")),
+            session_id=payload.get("session_id") or None,
         )
-        packet = cli.build_continuation_packet(cli.storage_root(namespace()), args)
-        if args.write:
-            packet["output_paths"] = cli.write_continuation_pack(cli.storage_root(namespace()), args.book, packet)
-            packet = with_document_refs(args.book, packet)
-        return ok(packet)
+        packet = run_command_json(cli.command_continue, **vars(args))
+        return ok(with_document_refs(args.book, packet))
 
     @app.post("/api/embed")
     def api_embed():
@@ -304,6 +334,10 @@ def make_app() -> Flask:
     def handle_novel_error(exc: cli.NovelReaderError):
         return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.errorhandler(cli.NovelReaderJsonError)
+    def handle_novel_json_error(exc: cli.NovelReaderJsonError):
+        return jsonify({"ok": False, "error": exc.payload.get("error", exc.payload)}), 400
+
     @app.errorhandler(ValueError)
     def handle_value_error(exc: ValueError):
         return jsonify({"ok": False, "error": str(exc)}), 400
@@ -357,11 +391,21 @@ def validate_scene(scene: Any) -> str | None:
     return scene
 
 
+def validate_scope(scope: Any) -> str:
+    value = str(scope or "partial")
+    if value not in {"partial", "full"}:
+        raise cli.NovelReaderError("scope must be partial or full.")
+    return value
+
+
 def run_command_json(func: Callable[[argparse.Namespace], int], **kwargs: Any) -> dict[str, Any]:
     buffer = io.StringIO()
     args = namespace(**kwargs)
-    with redirect_stdout(buffer):
-        result = func(args)
+    try:
+        with redirect_stdout(buffer):
+            result = func(args)
+    except cli.NovelReaderJsonError:
+        raise
     text = buffer.getvalue().strip()
     if result not in (0, None):
         raise cli.NovelReaderError(text or f"命令失败：{result}")

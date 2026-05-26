@@ -980,7 +980,7 @@ def command_finalize_reading(args: argparse.Namespace) -> int:
     root = storage_root(args)
     result = finalize_session(root, args.session_id)
     print_json(result)
-    return 0 if result.get("ok", result.get("final_reports_allowed")) else 1
+    return 0 if result.get("ok", result.get("full_scope_allowed")) else 1
 
 
 def load_summaries(book_path: Path) -> list[tuple[int, str]]:

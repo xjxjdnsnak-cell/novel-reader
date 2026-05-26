@@ -51,6 +51,14 @@ python ./bin/novel-reader continue <book_id> --after-chapter 12 --scope full --j
 
 If required coverage is missing, the command refuses full-scope output and returns the current coverage, missing chapters, and the next `read-next` command to run.
 
+`reading-status` exposes three explicit gates:
+
+- `required_coverage_complete`: required L1/L2/L3 notes are complete.
+- `finalized`: `finalize-reading` has been successfully run.
+- `full_scope_allowed`: both required coverage and finalize are complete.
+
+Use `full_scope_allowed` for new integrations. `final_reports_allowed` is kept as a deprecated compatibility alias for `full_scope_allowed`.
+
 ## What It Does
 
 - Indexes TXT/Markdown novels into chapters and chunks.

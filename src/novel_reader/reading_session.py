@@ -624,6 +624,9 @@ def calculate_status(root: Path, session_id: str) -> dict[str, Any]:
         for row in logs
         if LEVEL_ORDER[row["coverage_level"]] < LEVEL_ORDER[row["required_level"]]
     ]
+    required_complete = not missing
+    finalized = session["status"] == "finalized"
+    full_scope_allowed = required_complete and finalized
     return {
         "ok": True,
         "session_id": session_id,
@@ -641,17 +644,23 @@ def calculate_status(root: Path, session_id: str) -> dict[str, Any]:
         "missing_chapters": missing,
         "key_chapters": json.loads(session["key_chapters"]),
         "remaining_required_chapters": remaining_required,
-        "final_reports_allowed": not missing,
+        "required_coverage_complete": required_complete,
+        "finalized": finalized,
+        "full_scope_allowed": full_scope_allowed,
+        "final_reports_allowed": full_scope_allowed,
     }
 
 
 def finalize_session(root: Path, session_id: str) -> dict[str, Any]:
     status = calculate_status(root, session_id)
-    if not status["final_reports_allowed"]:
+    if not status["required_coverage_complete"]:
         return {
             "ok": False,
             "session_id": session_id,
             "final_reports_allowed": False,
+            "required_coverage_complete": False,
+            "finalized": False,
+            "full_scope_allowed": False,
             "coverage_percent": status["coverage_percent"],
             "missing_chapters": status["missing_chapters"],
             "next_step": f"novel-reader read-next {session_id} --json",
@@ -666,6 +675,9 @@ def finalize_session(root: Path, session_id: str) -> dict[str, Any]:
     finally:
         con.close()
     status["status"] = "finalized"
+    status["finalized"] = True
+    status["full_scope_allowed"] = True
+    status["final_reports_allowed"] = True
     return status
 
 
@@ -692,11 +704,11 @@ def full_scope_guard(root: Path, book_id: str, report_type: str, anchor_chapter:
         return False, blocked_payload(status, "Full outline/map requires all chapters at L1.", missing_l1 or status["missing_chapters"])
 
     if report_type == "analyze":
-        if mode not in {"balanced", "deep"} or not status["final_reports_allowed"]:
+        if mode not in {"balanced", "deep"} or not status["required_coverage_complete"]:
             return False, blocked_payload(status, "Full writing analysis requires a completed balanced/deep reading session.", status["missing_chapters"])
 
     if report_type == "style":
-        if mode not in {"balanced", "deep"} or status["l2_coverage_percent"] <= 0 or not status["final_reports_allowed"]:
+        if mode not in {"balanced", "deep"} or status["l2_coverage_percent"] <= 0 or not status["required_coverage_complete"]:
             return False, blocked_payload(status, "Full style distillation requires completed L2/L3 sample chapters.", status["missing_chapters"])
 
     if report_type == "continue":
@@ -712,7 +724,7 @@ def full_scope_guard(root: Path, book_id: str, report_type: str, anchor_chapter:
         if bad:
             return False, blocked_payload(status, "Full continuation requires anchor-near chapters at L2 or L3.", bad)
 
-    if not allow_unfinalized and status["status"] != "finalized":
+    if not allow_unfinalized and not status["finalized"]:
         return False, blocked_payload(
             status,
             "阅读覆盖已达标，但尚未 finalize-reading。请先运行 finalize-reading。",

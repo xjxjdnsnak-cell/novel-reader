@@ -163,9 +163,12 @@ def test_balanced_and_full_scope_guards(tmp_path: Path):
         run_cli(store, "submit-note", session["session_id"], "--chapter", str(chapter), "--text", note, "--json")
 
     final_status = load_json(run_cli(store, "reading-status", session["session_id"], "--json"))
-    assert final_status["final_reports_allowed"] is True
+    assert final_status["required_coverage_complete"] is True
+    assert final_status["full_scope_allowed"] is False
+    assert final_status["final_reports_allowed"] is False
 
     finalized = load_json(run_cli(store, "finalize-reading", session["session_id"], "--json"))
+    assert finalized["full_scope_allowed"] is True
     assert finalized["final_reports_allowed"] is True
 
     outline = load_json(run_cli(store, "outline", book, "--scope", "full", "--json"))
@@ -225,7 +228,10 @@ def test_full_scope_requires_finalize_even_after_coverage_is_complete(tmp_path: 
         run_cli(store, "submit-note", session["session_id"], "--chapter", str(chapter), "--text", valid_l1_note(chunk_id), "--json")
 
     status = load_json(run_cli(store, "reading-status", session["session_id"], "--json"))
-    assert status["final_reports_allowed"] is True
+    assert status["required_coverage_complete"] is True
+    assert status["finalized"] is False
+    assert status["full_scope_allowed"] is False
+    assert status["final_reports_allowed"] is False
     assert status["status"] != "finalized"
 
     blocked = run_cli(store, "outline", book, "--scope", "full", "--json", check=False)
@@ -233,5 +239,10 @@ def test_full_scope_requires_finalize_even_after_coverage_is_complete(tmp_path: 
     assert "finalize-reading" in json.loads(blocked.stdout)["error"]["next_action"]
 
     run_cli(store, "finalize-reading", session["session_id"], "--json")
+    finalized_status = load_json(run_cli(store, "reading-status", session["session_id"], "--json"))
+    assert finalized_status["required_coverage_complete"] is True
+    assert finalized_status["finalized"] is True
+    assert finalized_status["full_scope_allowed"] is True
+    assert finalized_status["final_reports_allowed"] is True
     allowed = load_json(run_cli(store, "outline", book, "--scope", "full", "--json"))
     assert allowed["ok"] is True

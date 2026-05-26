@@ -34,7 +34,7 @@ python ./bin/novel-reader submit-note <session_id> --chapter N --text "<structur
 python ./bin/novel-reader finalize-reading <session_id> --json
 ```
 
-Call `read-next` and `submit-note` repeatedly until `final_reports_allowed=true`.
+Call `read-next` and `submit-note` repeatedly until `full_scope_allowed=true`. The old `final_reports_allowed` field is deprecated and should be treated as a compatibility alias for `full_scope_allowed`.
 
 Do not generate `--scope full` outline/map/analyze/style/continue output before `finalize-reading` succeeds. If the user forces skipping, use `--scope partial` and label the result as partial-scope.
 
