@@ -61,6 +61,13 @@ class NovelReaderError(RuntimeError):
     pass
 
 
+class NovelReaderJsonError(RuntimeError):
+    def __init__(self, payload: dict[str, Any], return_code: int = 1):
+        super().__init__(json.dumps(payload, ensure_ascii=False))
+        self.payload = payload
+        self.return_code = return_code
+
+
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -76,12 +83,12 @@ def scope_value(args: argparse.Namespace) -> str:
 def require_full_scope(root: Path, book_id: str, report_type: str, args: argparse.Namespace, anchor_chapter: int | None = None) -> None:
     if scope_value(args) != "full":
         return
-    ok, payload = full_scope_guard(root, book_id, report_type, anchor_chapter)
+    ok, payload = full_scope_guard(root, book_id, report_type, anchor_chapter, getattr(args, "allow_unfinalized", False))
     if ok:
         return
     if getattr(args, "json", False):
-        print_json(payload)
-    raise NovelReaderError(json.dumps(payload, ensure_ascii=False))
+        raise NovelReaderJsonError(payload)
+    raise NovelReaderError(payload.get("error", {}).get("message") or payload.get("reason") or "Full-scope output is not allowed.")
 
 
 def read_text_file(path: Path) -> tuple[str, str]:
@@ -457,6 +464,7 @@ def command_status(args: argparse.Namespace) -> int:
         "index": {
             "fts_enabled": manifest.get("fts_enabled", False),
             "embedding": manifest.get("embedding", {}),
+            "vector_backend": "sqlite_cosine",
         },
         "store": str(book_dir(root, args.book)),
     }
@@ -1939,8 +1947,11 @@ def command_embed(args: argparse.Namespace) -> int:
 
 def command_output(func: Any, args: argparse.Namespace) -> tuple[int, Any]:
     buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        code = int(func(args))
+    try:
+        with contextlib.redirect_stdout(buffer):
+            code = int(func(args))
+    except NovelReaderJsonError as exc:
+        return exc.return_code, exc.payload
     text = buffer.getvalue().strip()
     if not text:
         return code, {}
@@ -2008,19 +2019,19 @@ def route_namespace(args: argparse.Namespace, route: IntentResult) -> tuple[Any 
             json=args.json,
         )
     if route.intent == "outline":
-        return command_outline, argparse.Namespace(**common, write=args.write, json=args.json, scope=scope)
+        return command_outline, argparse.Namespace(**common, write=args.write, json=args.json, scope=scope, allow_unfinalized=False)
     if route.intent == "map":
-        return command_map, argparse.Namespace(**common, scope=scope)
+        return command_map, argparse.Namespace(**common, scope=scope, allow_unfinalized=False)
     if route.intent == "analyze":
-        return command_analyze, argparse.Namespace(**common, scope=scope)
+        return command_analyze, argparse.Namespace(**common, scope=scope, allow_unfinalized=False, json=args.json)
     if route.intent == "style":
-        return command_style, argparse.Namespace(**common, scene=scene, write=args.write, json=args.json, scope=scope)
+        return command_style, argparse.Namespace(**common, scene=scene, write=args.write, json=args.json, scope=scope, allow_unfinalized=False)
     if route.intent == "continue":
         return command_continue, argparse.Namespace(
             **common,
             after_chapter=after_chapter,
             after_chunk=after_chunk,
-            outline=suggested.get("outline") or query,
+            outline=suggested.get("outline"),
             outline_file=None,
             semantic=args.semantic,
             scene=scene,
@@ -2030,6 +2041,7 @@ def route_namespace(args: argparse.Namespace, route: IntentResult) -> tuple[Any 
             write=args.write,
             json=args.json,
             scope=scope,
+            allow_unfinalized=False,
         )
     if route.intent == "embed":
         return command_embed, argparse.Namespace(
@@ -2065,7 +2077,10 @@ def command_do(args: argparse.Namespace) -> int:
 
     if args.json:
         code, payload = command_output(func, routed_args)
-        print_json({"ok": code == 0, "route": route.to_dict(), "payload": payload})
+        if code != 0 and isinstance(payload, dict) and "error" in payload:
+            print_json({"ok": False, "route": route.to_dict(), "error": payload["error"]})
+        else:
+            print_json({"ok": code == 0, "route": route.to_dict(), "payload": payload})
         return code
     return int(func(routed_args))
 
@@ -2274,17 +2289,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("book")
     p.add_argument("--write", action="store_true", help="写入 maps/outline.md，否则输出到终端。")
     p.add_argument("--scope", choices=("partial", "full"), default="partial")
+    p.add_argument("--allow-unfinalized", action="store_true")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=command_outline)
 
     p = sub.add_parser("map", help="生成全书地图草案。")
     p.add_argument("book")
     p.add_argument("--scope", choices=("partial", "full"), default="partial")
+    p.add_argument("--allow-unfinalized", action="store_true")
     p.set_defaults(func=command_map)
 
     p = sub.add_parser("analyze", help="生成写作分析报告草案。")
     p.add_argument("book")
     p.add_argument("--scope", choices=("partial", "full"), default="partial")
+    p.add_argument("--allow-unfinalized", action="store_true")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=command_analyze)
 
     p = sub.add_parser("style", help="Distill language style evidence and original-writing guidance.")
@@ -2293,6 +2312,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--write", action="store_true", help="Write style artifacts under styles/.")
     p.add_argument("--json", action="store_true", help="Return a structured evidence packet.")
     p.add_argument("--scope", choices=("partial", "full"), default="partial")
+    p.add_argument("--allow-unfinalized", action="store_true")
     p.set_defaults(func=command_style)
 
     p = sub.add_parser("continue", help="Build a continuation writing package without generating prose.")
@@ -2311,6 +2331,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--write", action="store_true", help="Write JSON/Markdown continuation packs under continuations/.")
     p.add_argument("--json", action="store_true", help="Return a structured continuation package.")
     p.add_argument("--scope", choices=("partial", "full"), default="partial")
+    p.add_argument("--allow-unfinalized", action="store_true")
     p.set_defaults(func=command_continue)
 
     p = sub.add_parser("do", help="Natural-language unified entrypoint for common novel-reader tasks.")
@@ -2339,6 +2360,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--length", choices=tuple(CONTINUATION_LENGTHS), default="medium")
     p.add_argument("--json", action="store_true")
     p.add_argument("--scope", choices=("partial", "full"), default="partial")
+    p.add_argument("--allow-unfinalized", action="store_true")
     p.set_defaults(func=command_write_next)
 
     p = sub.add_parser("embed", help="可选：用 openai-compatible embedding 增强语义检索。")
@@ -2359,6 +2381,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
+    except NovelReaderJsonError as exc:
+        print_json(exc.payload)
+        return exc.return_code
     except (NovelReaderError, ValueError) as exc:
         print(f"novel-reader: {exc}", file=sys.stderr)
         return 1

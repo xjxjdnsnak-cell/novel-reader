@@ -115,23 +115,50 @@ def group_chunks_by_chapter(chunks: list[dict[str, Any]]) -> dict[int, list[dict
     return grouped
 
 
-def score_chapter_importance(chapter_text: str, chapter_meta: dict[str, Any], query: str | None = None) -> float:
+def score_chapter_importance(chapter_text: str, chapter_meta: dict[str, Any], query: str | None = None) -> dict[str, Any]:
     text = chapter_text.lower()
     proper_names = len(re.findall(r"\b[A-Z][A-Za-z0-9_]{2,}\b", chapter_text))
     conflict_terms = ("battle", "fight", "conflict", "kill", "death", "betrayal", "war", "attack")
     setting_terms = ("rule", "setting", "system", "faction", "empire", "tower", "power", "level")
     secret_terms = ("secret", "truth", "clue", "mystery", "breakthrough", "oath", "hidden")
+    chinese_combat = ("杀", "血", "剑", "刀", "枪", "拳", "伤", "死", "敌", "战", "冲", "退", "爆", "轰", "斩", "逃", "追", "围攻")
+    chinese_reversal = ("真相", "秘密", "线索", "发现", "原来", "竟然", "背叛", "隐藏", "暴露", "谜", "疑点", "异常", "预感")
+    chinese_setting = ("规则", "境界", "功法", "宗门", "势力", "组织", "等级", "系统", "能力", "法术", "灵力", "血脉", "传承")
+    chinese_relation = ("沉默", "眼泪", "喜欢", "恨", "告别", "牺牲", "承诺", "误会", "心中", "愧疚", "愤怒", "恐惧")
+    chinese_progress = ("离开", "进入", "突破", "失败", "选择", "代价", "决定", "出发", "抵达", "失踪", "死亡", "重逢")
+    reasons: list[str] = []
     score = len(chapter_text) / 1000.0
-    score += min(proper_names, 40) * 0.2
-    score += sum(text.count(term) for term in conflict_terms) * 1.5
-    score += sum(text.count(term) for term in setting_terms) * 1.0
-    score += sum(text.count(term) for term in secret_terms) * 1.2
+    if chapter_text:
+        reasons.append("chapter_length")
+    if proper_names:
+        score += min(proper_names, 40) * 0.2
+        reasons.append("proper_name_density")
+    buckets = (
+        ("combat_keywords", conflict_terms, 1.5, text),
+        ("setting_keywords", setting_terms, 1.0, text),
+        ("reversal_keywords", secret_terms, 1.2, text),
+        ("combat_keywords", chinese_combat, 0.9, chapter_text),
+        ("reversal_keywords", chinese_reversal, 1.4, chapter_text),
+        ("setting_keywords", chinese_setting, 1.1, chapter_text),
+        ("relationship_keywords", chinese_relation, 0.8, chapter_text),
+        ("plot_progress_keywords", chinese_progress, 1.0, chapter_text),
+    )
+    for reason, terms, weight, haystack in buckets:
+        hits = sum(haystack.count(term) for term in terms)
+        if hits:
+            score += hits * weight
+            if reason not in reasons:
+                reasons.append(reason)
     if query:
         for term in re.findall(r"\w+", query.lower()):
             if len(term) >= 2:
-                score += text.count(term) * 2.0
+                hits = text.count(term)
+                if hits:
+                    score += hits * 2.0
+                    if "query_matches" not in reasons:
+                        reasons.append("query_matches")
     score += int(chapter_meta.get("chapter_index", 0)) * 0.001
-    return round(score, 4)
+    return {"score": round(score, 4), "reasons": reasons}
 
 
 def choose_key_chapters(
@@ -147,7 +174,7 @@ def choose_key_chapters(
     for chapter in chapters:
         index = int(chapter["chapter_index"])
         text = "\n".join(chunk["text"] for chunk in chunks_by_chapter.get(index, []))
-        scored.append((score_chapter_importance(text, chapter, query), index))
+        scored.append((score_chapter_importance(text, chapter, query)["score"], index))
     scored.sort(key=lambda item: (-item[0], item[1]))
     return sorted(index for _, index in scored[:count])
 
@@ -603,6 +630,7 @@ def calculate_status(root: Path, session_id: str) -> dict[str, Any]:
         "book_id": session["book_id"],
         "goal": session["goal"],
         "mode": session["mode"],
+        "status": session["status"],
         "total_chapters": total,
         "completed_chapters": total - len(missing),
         "coverage_percent": round((total - len(missing)) * 100 / max(total, 1), 2),
@@ -648,16 +676,15 @@ def scope_status_for_book(root: Path, book_id: str) -> dict[str, Any] | None:
     return calculate_status(root, session["session_id"])
 
 
-def full_scope_guard(root: Path, book_id: str, report_type: str, anchor_chapter: int | None = None) -> tuple[bool, dict[str, Any]]:
+def full_scope_guard(root: Path, book_id: str, report_type: str, anchor_chapter: int | None = None, allow_unfinalized: bool = False) -> tuple[bool, dict[str, Any]]:
     status = scope_status_for_book(root, book_id)
     if not status:
-        return False, {
-            "ok": False,
-            "reason": "No reading session found for full-scope output.",
-            "coverage_percent": 0,
-            "missing_chapters": "all",
-            "next_step": f"novel-reader read-session {book_id} --goal full --mode balanced --json",
-        }
+        return False, full_scope_error(
+            "No reading session found for full-scope output.",
+            None,
+            "all",
+            f"novel-reader read-session {book_id} --goal full --mode balanced --json",
+        )
 
     mode = status["mode"]
     missing_l1 = [item["chapter"] for item in status["remaining_required_chapters"] if item["required_level"] == LEVEL_L1]
@@ -685,18 +712,52 @@ def full_scope_guard(root: Path, book_id: str, report_type: str, anchor_chapter:
         if bad:
             return False, blocked_payload(status, "Full continuation requires anchor-near chapters at L2 or L3.", bad)
 
+    if not allow_unfinalized and status["status"] != "finalized":
+        return False, blocked_payload(
+            status,
+            "阅读覆盖已达标，但尚未 finalize-reading。请先运行 finalize-reading。",
+            [],
+            f"novel-reader finalize-reading {status['session_id']} --json",
+        )
+
     return True, {"ok": True, "reading_status": status}
 
 
-def blocked_payload(status: dict[str, Any], reason: str, missing: Any) -> dict[str, Any]:
+def blocked_payload(status: dict[str, Any], reason: str, missing: Any, next_action: str | None = None) -> dict[str, Any]:
+    return full_scope_error(
+        reason,
+        status,
+        missing,
+        next_action or f"novel-reader read-next {status['session_id']} --json",
+    )
+
+
+def full_scope_error(message: str, status: dict[str, Any] | None, missing: Any, next_action: str) -> dict[str, Any]:
+    coverage = {
+        "coverage_percent": 0,
+        "l1_coverage_percent": 0,
+        "l2_coverage_percent": 0,
+        "l3_coverage_percent": 0,
+        "session_status": None,
+    }
+    if status:
+        coverage = {
+            "coverage_percent": status["coverage_percent"],
+            "l1_coverage_percent": status["l1_coverage_percent"],
+            "l2_coverage_percent": status["l2_coverage_percent"],
+            "l3_coverage_percent": status["l3_coverage_percent"],
+            "session_status": status["status"],
+        }
     return {
         "ok": False,
-        "reason": reason,
-        "session_id": status["session_id"],
-        "coverage_percent": status["coverage_percent"],
-        "l1_coverage_percent": status["l1_coverage_percent"],
-        "l2_coverage_percent": status["l2_coverage_percent"],
-        "l3_coverage_percent": status["l3_coverage_percent"],
+        "reason": message,
         "missing_chapters": missing,
-        "next_step": f"novel-reader read-next {status['session_id']} --json",
+        "next_step": next_action,
+        "error": {
+            "code": "FULL_SCOPE_NOT_ALLOWED",
+            "message": message,
+            "coverage": coverage,
+            "missing_chapters": missing,
+            "next_action": next_action,
+        },
     }

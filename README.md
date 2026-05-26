@@ -134,7 +134,21 @@ embed <book>                          Optional semantic index
 
 ## Semantic Search
 
-Keyword search and SQLite FTS work locally by default. Semantic search requires an embedding index and a running OpenAI-compatible embedding endpoint for query vectors.
+Keyword search and SQLite FTS work locally by default.
+
+Current semantic search is deliberately simple:
+
+- Embedding service generates vectors.
+- Novel Reader stores vectors in the local SQLite `embeddings` table as `vector_json`.
+- Query-time ranking uses local Python cosine similarity over those SQLite-stored vectors.
+
+This version does not integrate an external vector database such as Qdrant, Chroma, FAISS, or Milvus. Status reports this as:
+
+```text
+vector_backend: sqlite_cosine
+```
+
+Semantic search requires an embedding index and a running OpenAI-compatible embedding endpoint for query vectors.
 
 For local Qwen:
 
@@ -150,6 +164,12 @@ Then:
 ```bash
 python ./bin/novel-reader do <book_id> "找一下人物动机变化" --semantic
 ```
+
+TODO backend options:
+
+- `sqlite-vec`
+- FAISS
+- Qdrant
 
 ## Safety Notes
 

@@ -102,6 +102,19 @@ def extract_chunk(text: str) -> str | None:
     return match.group(0) if match else None
 
 
+def extract_explicit_outline(text: str) -> str | None:
+    patterns = (
+        r"(?:按这个大纲|大纲如下|剧情方向|按照以下内容续写)\s*[:：]\s*(.+)$",
+        r"outline\s*[:：]\s*(.+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I | re.S)
+        if match:
+            outline = match.group(1).strip()
+            return outline or None
+    return None
+
+
 def clean_query(text: str) -> str:
     cleaned = text.strip()
     prefixes = (
@@ -168,15 +181,14 @@ def classify_request(text: str) -> IntentResult:
     if any(word in raw for word in ("续写", "接着写", "继续写", "往后写", "下一章", "写下一段")) or any(
         word in lowered for word in ("continue", "write next", "next chapter")
     ):
-        outline = query
-        return result("continue", 0.93, "continuation keyword matched", raw, outline=outline)
+        return result("continue", 0.93, "continuation keyword matched", raw, outline=extract_explicit_outline(raw))
 
     if any(word in raw for word in ("风格", "文风", "语言", "场景怎么写", "写法", "蒸馏")) or any(
         word in lowered for word in ("style", "voice", "tone")
     ):
         return result("style", 0.9, "style keyword matched", raw)
 
-    if any(word in raw for word in ("写作分析", "优缺点", "节奏", "人物弧光", "冲突", "伏笔", "修改建议")) or "analyze" in lowered:
+    if any(word in raw for word in ("分析", "写作分析", "优缺点", "节奏", "人物弧光", "冲突", "伏笔", "修改建议")) or "analyze" in lowered:
         return result("analyze", 0.89, "analysis keyword matched", raw)
 
     if any(word in raw for word in ("人物表", "事件表", "时间线", "地点表", "势力表", "设定表", "地图", "图谱")) or "map" in lowered:

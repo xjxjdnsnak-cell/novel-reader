@@ -187,3 +187,51 @@ def test_read_next_batch_and_continue_scope_guard(tmp_path: Path):
     payload = load_json(blocked)
     assert payload["ok"] is False
     assert "read-next" in payload["next_step"]
+
+
+def test_full_scope_json_error_is_single_parseable_payload(tmp_path: Path):
+    store, book = import_book(tmp_path)
+    load_json(run_cli(store, "read-session", book, "--mode", "balanced", "--json"))
+
+    blocked = run_cli(store, "analyze", book, "--scope", "full", "--json", check=False)
+
+    assert blocked.returncode != 0
+    assert blocked.stdout.strip().startswith("{")
+    assert blocked.stderr.strip() == ""
+    payload = json.loads(blocked.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "FULL_SCOPE_NOT_ALLOWED"
+
+
+def test_do_json_wraps_full_scope_failure_as_error(tmp_path: Path):
+    store, book = import_book(tmp_path)
+    load_json(run_cli(store, "read-session", book, "--mode", "survey", "--json"))
+
+    blocked = run_cli(store, "do", book, "完整分析全书", "--json", check=False)
+
+    assert blocked.returncode != 0
+    payload = json.loads(blocked.stdout)
+    assert payload["ok"] is False
+    assert payload["route"]["intent"] == "analyze"
+    assert payload["error"]["code"] == "FULL_SCOPE_NOT_ALLOWED"
+
+
+def test_full_scope_requires_finalize_even_after_coverage_is_complete(tmp_path: Path):
+    store, book = import_book(tmp_path)
+    session = load_json(run_cli(store, "read-session", book, "--mode", "survey", "--json"))
+    for chapter in range(1, 5):
+        packet = load_json(run_cli(store, "read-next", session["session_id"], "--chapter", str(chapter), "--json"))
+        chunk_id = packet["chapters"][0]["chunks"][0]["chunk_id"]
+        run_cli(store, "submit-note", session["session_id"], "--chapter", str(chapter), "--text", valid_l1_note(chunk_id), "--json")
+
+    status = load_json(run_cli(store, "reading-status", session["session_id"], "--json"))
+    assert status["final_reports_allowed"] is True
+    assert status["status"] != "finalized"
+
+    blocked = run_cli(store, "outline", book, "--scope", "full", "--json", check=False)
+    assert blocked.returncode != 0
+    assert "finalize-reading" in json.loads(blocked.stdout)["error"]["next_action"]
+
+    run_cli(store, "finalize-reading", session["session_id"], "--json")
+    allowed = load_json(run_cli(store, "outline", book, "--scope", "full", "--json"))
+    assert allowed["ok"] is True

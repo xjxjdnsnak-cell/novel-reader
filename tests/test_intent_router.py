@@ -24,3 +24,16 @@ def test_continue_request_extracts_controls():
 def test_search_request():
     result = classify_request("找一下小舞献祭")
     assert result.intent == "search"
+def test_plain_continue_request_has_no_outline():
+    result = classify_request("接第12章后面续写，短一点，偏悬疑")
+    assert result.intent == "continue"
+    assert result.suggested_args["after_chapter"] == 12
+    assert result.suggested_args["length"] == "short"
+    assert "outline" not in result.suggested_args
+
+
+def test_explicit_continue_outline_is_extracted():
+    result = classify_request("接第12章后面续写，大纲如下：主角潜入北塔")
+    assert result.intent == "continue"
+    assert result.suggested_args["after_chapter"] == 12
+    assert result.suggested_args["outline"] == "主角潜入北塔"

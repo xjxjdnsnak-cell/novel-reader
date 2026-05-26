@@ -16,6 +16,7 @@ from typing import Any, Callable
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
 from . import cli
+from . import reading_session
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
@@ -200,6 +201,54 @@ def make_app() -> Flask:
         )
         return ok(data)
 
+    @app.post("/api/reading/session")
+    def api_reading_session():
+        payload = request_json()
+        result = reading_session.create_session(
+            cli.storage_root(namespace()),
+            required_payload(payload, "book"),
+            str(payload.get("goal") or "full"),
+            str(payload.get("mode") or "balanced"),
+            float(payload.get("deep_ratio") or 0.25),
+            query=payload.get("query") or None,
+            focus_chapter=maybe_int(payload.get("focus_chapter")),
+            after_chapter=maybe_int(payload.get("after_chapter")),
+        )
+        return ok(result)
+
+    @app.get("/api/reading/session/<session_id>/status")
+    def api_reading_session_status(session_id: str):
+        return ok(reading_session.calculate_status(cli.storage_root(namespace()), session_id))
+
+    @app.post("/api/reading/session/<session_id>/next")
+    def api_reading_session_next(session_id: str):
+        payload = request_json()
+        result = reading_session.build_read_next(
+            cli.storage_root(namespace()),
+            session_id,
+            int(payload.get("batch_chapters") or 1),
+            maybe_int(payload.get("chapter")),
+        )
+        return ok(result)
+
+    @app.post("/api/reading/session/<session_id>/submit-note")
+    def api_reading_session_submit_note(session_id: str):
+        payload = request_json()
+        result = reading_session.submit_note(
+            cli.storage_root(namespace()),
+            session_id,
+            int(payload.get("chapter") or 0),
+            str(payload.get("text") or ""),
+        )
+        status_code = 200 if result.get("ok") else 400
+        return jsonify(result), status_code
+
+    @app.post("/api/reading/session/<session_id>/finalize")
+    def api_reading_session_finalize(session_id: str):
+        result = reading_session.finalize_session(cli.storage_root(namespace()), session_id)
+        status_code = 200 if result.get("ok", result.get("final_reports_allowed")) else 400
+        return jsonify(result), status_code
+
     @app.get("/api/documents")
     def api_documents():
         book = required_arg("book")
@@ -253,6 +302,10 @@ def make_app() -> Flask:
 
     @app.errorhandler(cli.NovelReaderError)
     def handle_novel_error(exc: cli.NovelReaderError):
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.errorhandler(ValueError)
+    def handle_value_error(exc: ValueError):
         return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.errorhandler(Exception)
@@ -329,15 +382,15 @@ def ok(data: dict[str, Any]) -> Any:
 def embedding_status() -> dict[str, Any]:
     base_url = os.environ.get("NOVEL_READER_EMBED_BASE_URL", "").rstrip("/")
     if not base_url:
-        return {"configured": False, "available": False, "base_url": None, "local": False}
+        return {"configured": False, "available": False, "base_url": None, "local": False, "vector_backend": "sqlite_cosine"}
     local = base_url.startswith("http://127.0.0.1") or base_url.startswith("http://localhost")
     try:
         health_url = base_url.removesuffix("/v1") + "/health"
         with urllib.request.urlopen(health_url, timeout=2) as response:
             health = json.loads(response.read().decode("utf-8"))
-        return {"configured": True, "available": bool(health.get("ok")), "base_url": base_url, "local": local, "health": health}
+        return {"configured": True, "available": bool(health.get("ok")), "base_url": base_url, "local": local, "health": health, "vector_backend": "sqlite_cosine"}
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return {"configured": True, "available": False, "base_url": base_url, "local": local}
+        return {"configured": True, "available": False, "base_url": base_url, "local": local, "vector_backend": "sqlite_cosine"}
 
 
 def book_root(book_id: str) -> Path:
