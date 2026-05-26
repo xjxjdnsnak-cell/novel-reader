@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from novel_reader.reading_session import score_chapter_importance
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "novel-reader"
@@ -101,6 +103,18 @@ def test_read_session_status_and_read_next(tmp_path: Path):
     assert packet["note_schema"]["level"] == "L1_SKIMMED"
 
 
+def test_chinese_key_chapter_importance_has_specific_reason_breakdown():
+    daily = "今天他在院子里喝茶，整理房间，和朋友闲聊，晚上早早睡下。"
+    key = "真相终于暴露，宗门长老背叛众人，主角在围攻中突破境界，血脉传承苏醒，敌人死伤惨重。"
+
+    daily_score = score_chapter_importance(daily, {"chapter_index": 1})
+    key_score = score_chapter_importance(key, {"chapter_index": 2})
+
+    assert key_score["score"] > daily_score["score"] + 5
+    reasons = set(key_score["reasons"])
+    assert {"combat_keywords", "reversal_keywords", "setting_keywords", "plot_progress_keywords"} <= reasons
+
+
 def test_submit_note_validation_failures_do_not_update_coverage(tmp_path: Path):
     store, book = import_book(tmp_path)
     session = load_json(run_cli(store, "read-session", book, "--mode", "survey", "--json"))
@@ -141,6 +155,15 @@ def test_submit_valid_l1_note_updates_session_and_legacy_summary(tmp_path: Path)
 
     legacy = load_json(run_cli(store, "status", book, "--json"))
     assert legacy["summary_coverage"]["summarized_chapters"] == 1
+
+
+def test_map_accepts_json_option(tmp_path: Path):
+    store, book = import_book(tmp_path)
+
+    result = load_json(run_cli(store, "map", book, "--json"))
+
+    assert result["ok"] is True
+    assert result["path"].endswith("book-map.md")
 
 
 def test_balanced_and_full_scope_guards(tmp_path: Path):

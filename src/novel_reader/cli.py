@@ -2297,6 +2297,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("book")
     p.add_argument("--scope", choices=("partial", "full"), default="partial")
     p.add_argument("--allow-unfinalized", action="store_true")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=command_map)
 
     p = sub.add_parser("analyze", help="生成写作分析报告草案。")
