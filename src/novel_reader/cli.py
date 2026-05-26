@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import contextlib
 import datetime as dt
 import hashlib
+import io
 import json
 import math
 import os
@@ -18,6 +20,16 @@ import urllib.request
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
+
+from .intent_router import IntentResult, classify_request
+from .reading_session import (
+    build_read_next,
+    calculate_status,
+    create_session,
+    finalize_session,
+    full_scope_guard,
+    submit_note,
+)
 
 
 DEFAULT_CHUNK_CHARS = 6000
@@ -55,6 +67,21 @@ def now_iso() -> str:
 
 def print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def scope_value(args: argparse.Namespace) -> str:
+    return getattr(args, "scope", "partial") or "partial"
+
+
+def require_full_scope(root: Path, book_id: str, report_type: str, args: argparse.Namespace, anchor_chapter: int | None = None) -> None:
+    if scope_value(args) != "full":
+        return
+    ok, payload = full_scope_guard(root, book_id, report_type, anchor_chapter)
+    if ok:
+        return
+    if getattr(args, "json", False):
+        print_json(payload)
+    raise NovelReaderError(json.dumps(payload, ensure_ascii=False))
 
 
 def read_text_file(path: Path) -> tuple[str, str]:
@@ -620,11 +647,86 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def local_config_path() -> Path:
+    return Path(__file__).resolve().parents[2] / ".novel-reader-local" / "config.json"
+
+
+def read_local_launcher_config() -> dict[str, Any]:
+    path = local_config_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def local_qwen_embedding_health(port: int = 8081) -> dict[str, Any] | None:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if data.get("ok") and data.get("model_loaded"):
+            data["port"] = port
+            return data
+        return None
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+
+def local_qwen_embedding_available(port: int = 8081) -> bool:
+    return local_qwen_embedding_health(port) is not None
+
+
+def discover_local_qwen_embedding() -> dict[str, Any] | None:
+    ports: list[int] = []
+    config = read_local_launcher_config()
+    if config.get("port"):
+        try:
+            ports.append(int(config["port"]))
+        except (TypeError, ValueError):
+            pass
+    base_url = os.environ.get("NOVEL_READER_EMBED_BASE_URL", "")
+    match = re.search(r":(\d+)(?:/|$)", base_url)
+    if match:
+        ports.append(int(match.group(1)))
+    ports.extend(range(8081, 8086))
+
+    seen = set()
+    for port in ports:
+        if port in seen:
+            continue
+        seen.add(port)
+        health = local_qwen_embedding_health(port)
+        if health:
+            return health
+    return None
+
+
+def resolve_embedding_config(model: str | None = None) -> tuple[str, str, str]:
+    base_url = os.environ.get("NOVEL_READER_EMBED_BASE_URL", "").rstrip("/")
+    api_key = os.environ.get("NOVEL_READER_EMBED_API_KEY", "")
+    resolved_model = model or os.environ.get("NOVEL_READER_EMBED_MODEL", "")
+
+    local_health = discover_local_qwen_embedding()
+    if not base_url and local_health:
+        base_url = f"http://127.0.0.1:{local_health.get('port', 8081)}/v1"
+        api_key = api_key or "local"
+        resolved_model = resolved_model or local_health.get("model") or "qwen3-embedding-0.6b"
+
+    if not base_url:
+        base_url = "https://api.openai.com/v1"
+    if not resolved_model:
+        resolved_model = "text-embedding-3-small"
+    if not api_key and (base_url.startswith("http://127.0.0.1") or base_url.startswith("http://localhost")):
+        api_key = "local"
+
+    return api_key, base_url, resolved_model
+
+
 def embed_texts(texts: list[str], provider: str, model: str) -> list[list[float]]:
     if provider != "openai-compatible":
         raise NovelReaderError("目前只实现 openai-compatible embedding provider。")
-    api_key = os.environ.get("NOVEL_READER_EMBED_API_KEY")
-    base_url = os.environ.get("NOVEL_READER_EMBED_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    api_key, base_url, model = resolve_embedding_config(model)
     if not api_key:
         raise NovelReaderError("未配置 NOVEL_READER_EMBED_API_KEY，无法启用 embedding。")
     payload = json.dumps({"model": model, "input": texts}).encode("utf-8")
@@ -824,6 +926,55 @@ def command_note(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_read_session(args: argparse.Namespace) -> int:
+    root = storage_root(args)
+    result = create_session(
+        root,
+        args.book,
+        args.goal,
+        args.mode,
+        args.deep_ratio,
+        query=args.query,
+        focus_chapter=args.focus_chapter,
+        after_chapter=args.after_chapter,
+    )
+    print_json(result)
+    return 0
+
+
+def command_read_next(args: argparse.Namespace) -> int:
+    root = storage_root(args)
+    result = build_read_next(root, args.session_id, args.batch_chapters, args.chapter)
+    print_json(result)
+    return 0
+
+
+def command_submit_note(args: argparse.Namespace) -> int:
+    root = storage_root(args)
+    if args.text is not None:
+        text = args.text
+    elif args.file:
+        text = Path(args.file).expanduser().read_text(encoding="utf-8")
+    else:
+        text = sys.stdin.read()
+    result = submit_note(root, args.session_id, args.chapter, text)
+    print_json(result)
+    return 0 if result.get("ok") else 1
+
+
+def command_reading_status(args: argparse.Namespace) -> int:
+    root = storage_root(args)
+    print_json(calculate_status(root, args.session_id))
+    return 0
+
+
+def command_finalize_reading(args: argparse.Namespace) -> int:
+    root = storage_root(args)
+    result = finalize_session(root, args.session_id)
+    print_json(result)
+    return 0 if result.get("ok", result.get("final_reports_allowed")) else 1
+
+
 def load_summaries(book_path: Path) -> list[tuple[int, str]]:
     rows = []
     for path in sorted((book_path / "summaries").glob("chapter-*.md")):
@@ -877,6 +1028,7 @@ def render_outline(manifest: dict[str, Any], chapters: list[dict[str, Any]], sum
 
 def command_outline(args: argparse.Namespace) -> int:
     root = storage_root(args)
+    require_full_scope(root, args.book, "outline", args)
     manifest = load_manifest(root, args.book)
     target = book_dir(root, args.book)
     chapters = fetch_chapters(root, args.book)
@@ -886,6 +1038,8 @@ def command_outline(args: argparse.Namespace) -> int:
         out = target / "maps" / "outline.md"
         out.write_text(outline, encoding="utf-8")
         print_json({"ok": True, "path": str(out)})
+    elif getattr(args, "json", False):
+        print_json({"ok": True, "text": outline})
     else:
         print(outline)
     return 0
@@ -929,6 +1083,7 @@ def render_map(manifest: dict[str, Any], summaries: list[tuple[int, str]]) -> st
 
 def command_map(args: argparse.Namespace) -> int:
     root = storage_root(args)
+    require_full_scope(root, args.book, "map", args)
     manifest = load_manifest(root, args.book)
     target = book_dir(root, args.book)
     content = render_map(manifest, load_summaries(target))
@@ -974,6 +1129,7 @@ def render_analysis(manifest: dict[str, Any], summaries: list[tuple[int, str]]) 
 
 def command_analyze(args: argparse.Namespace) -> int:
     root = storage_root(args)
+    require_full_scope(root, args.book, "analyze", args)
     manifest = load_manifest(root, args.book)
     target = book_dir(root, args.book)
     content = render_analysis(manifest, load_summaries(target))
@@ -1327,6 +1483,7 @@ def command_style(args: argparse.Namespace) -> int:
     if args.scene and args.scene not in STYLE_SCENES:
         raise NovelReaderError("--scene 只支持：战斗、悬疑、感情、日常、说明。")
     root = storage_root(args)
+    require_full_scope(root, args.book, "style", args)
     packet = build_style_packet(root, args.book, args.scene)
     if args.json:
         print_json(packet)
@@ -1703,6 +1860,7 @@ def command_continue(args: argparse.Namespace) -> int:
     if args.evidence_top < 1:
         raise NovelReaderError("--evidence-top 必须大于 0。")
     root = storage_root(args)
+    require_full_scope(root, args.book, "continue", args, args.after_chapter)
     packet = build_continuation_packet(root, args)
     if args.write:
         packet["output_paths"] = write_continuation_pack(root, args.book, packet)
@@ -1722,16 +1880,19 @@ def command_embed(args: argparse.Namespace) -> int:
     root = storage_root(args)
     manifest = load_manifest(root, args.book)
     provider = args.provider
-    model = args.model or os.environ.get("NOVEL_READER_EMBED_MODEL", "text-embedding-3-small")
-    if not os.environ.get("NOVEL_READER_EMBED_API_KEY"):
+    api_key, base_url, model = resolve_embedding_config(args.model)
+    if not api_key:
         print_json(
             {
                 "ok": False,
                 "configured": False,
-                "message": "未配置 NOVEL_READER_EMBED_API_KEY。核心本地检索仍可使用；配置后再运行本命令。",
+                "message": "未发现可用 embedding 服务。请先启动本地 Qwen，或配置 NOVEL_READER_EMBED_*。核心本地检索仍可使用。",
             }
         )
         return 2
+    os.environ["NOVEL_READER_EMBED_API_KEY"] = api_key
+    os.environ["NOVEL_READER_EMBED_BASE_URL"] = base_url
+    os.environ["NOVEL_READER_EMBED_MODEL"] = model
 
     con = open_db(root, args.book)
     try:
@@ -1776,6 +1937,194 @@ def command_embed(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_output(func: Any, args: argparse.Namespace) -> tuple[int, Any]:
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = int(func(args))
+    text = buffer.getvalue().strip()
+    if not text:
+        return code, {}
+    try:
+        return code, json.loads(text)
+    except json.JSONDecodeError:
+        return code, {"text": text}
+
+
+def do_unknown_response(route: IntentResult, as_json: bool) -> int:
+    advice = {
+        "ok": False,
+        "route": route.to_dict(),
+        "message": "无法判断需求。请尝试描述为：查看状态、读取第 N 章、搜索某剧情、问某问题、梳理剧情、生成地图、写作分析、风格分析、续写、建立语义索引。",
+        "examples": [
+            'novel-reader do <book> "这本书现在读到哪了"',
+            'novel-reader do <book> "找一下小舞献祭"',
+            'novel-reader do <book> "接第12章后面续写，短一点，偏悬疑"',
+        ],
+    }
+    if as_json:
+        print_json(advice)
+    else:
+        print(advice["message"])
+        for example in advice["examples"]:
+            print(f"- {example}")
+    return 0
+
+
+def route_namespace(args: argparse.Namespace, route: IntentResult) -> tuple[Any | None, argparse.Namespace | None]:
+    suggested = dict(route.suggested_args)
+    top = args.top or 8
+    scene = args.scene or suggested.get("scene")
+    length = args.length or suggested.get("length") or "medium"
+    after_chapter = args.after_chapter if args.after_chapter is not None else suggested.get("after_chapter")
+    after_chunk = args.after_chunk or suggested.get("chunk")
+    chapter = suggested.get("chapter")
+    chunk = suggested.get("chunk")
+    query = suggested.get("query") or suggested.get("question") or suggested.get("outline") or clean_do_request(args.request)
+
+    common = {"store": args.store, "book": args.book}
+    scope = args.scope or suggested.get("scope") or "partial"
+    if route.intent == "status":
+        return command_status, argparse.Namespace(**common, json=args.json)
+    if route.intent == "read":
+        if not chapter and not chunk:
+            return None, None
+        return command_read, argparse.Namespace(**common, chapter=chapter, chunk=chunk, limit_chars=None, json=args.json)
+    if route.intent == "search":
+        return command_search, argparse.Namespace(
+            **common,
+            query=query,
+            top=top,
+            context_chars=360,
+            semantic=args.semantic,
+            json=args.json,
+        )
+    if route.intent == "ask":
+        return command_ask, argparse.Namespace(
+            **common,
+            question=suggested.get("question") or query,
+            top=top,
+            context_chars=500,
+            semantic=args.semantic,
+            json=args.json,
+        )
+    if route.intent == "outline":
+        return command_outline, argparse.Namespace(**common, write=args.write, json=args.json, scope=scope)
+    if route.intent == "map":
+        return command_map, argparse.Namespace(**common, scope=scope)
+    if route.intent == "analyze":
+        return command_analyze, argparse.Namespace(**common, scope=scope)
+    if route.intent == "style":
+        return command_style, argparse.Namespace(**common, scene=scene, write=args.write, json=args.json, scope=scope)
+    if route.intent == "continue":
+        return command_continue, argparse.Namespace(
+            **common,
+            after_chapter=after_chapter,
+            after_chunk=after_chunk,
+            outline=suggested.get("outline") or query,
+            outline_file=None,
+            semantic=args.semantic,
+            scene=scene,
+            length=length,
+            context_chunks=5,
+            evidence_top=top,
+            write=args.write,
+            json=args.json,
+            scope=scope,
+        )
+    if route.intent == "embed":
+        return command_embed, argparse.Namespace(
+            **common,
+            provider="openai-compatible",
+            model=None,
+            batch_size=16,
+            max_chars=2500,
+            limit=None,
+            quiet=False,
+        )
+    return None, None
+
+
+def clean_do_request(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip())
+
+
+def command_do(args: argparse.Namespace) -> int:
+    route = classify_request(args.request)
+    if route.intent == "unknown":
+        return do_unknown_response(route, args.json)
+
+    func, routed_args = route_namespace(args, route)
+    if func is None or routed_args is None:
+        fallback = IntentResult(
+            intent="unknown",
+            confidence=route.confidence,
+            reason=f"{route.reason}; missing required routing argument",
+            suggested_args=route.suggested_args,
+        )
+        return do_unknown_response(fallback, args.json)
+
+    if args.json:
+        code, payload = command_output(func, routed_args)
+        print_json({"ok": code == 0, "route": route.to_dict(), "payload": payload})
+        return code
+    return int(func(routed_args))
+
+
+def build_prose_generation_prompt(packet: dict[str, Any]) -> str:
+    goal = packet["continuation_goal"]
+    if goal.get("after_chunk"):
+        anchor = goal["after_chunk"]
+    elif goal.get("after_chapter"):
+        anchor = f"第 {goal['after_chapter']} 章之后"
+    else:
+        anchor = "当前续写点"
+    return "\n".join(
+        [
+            "你将根据 novel-reader continuation package 写原创续写正文。",
+            f"续写位置：{anchor}",
+            f"目标长度：{goal.get('target_length')}（{goal.get('target_length_hint')}）",
+            f"场景倾向：{goal.get('scene') or '未指定'}",
+            f"用户大纲：{goal.get('outline') or '未指定'}",
+            "",
+            "写作要求：",
+            "1. 先阅读 recent_context、plot_evidence、style_evidence、constraints。",
+            "2. 只把有证据的位置当作事实约束；证据不足处保持悬念或模糊处理。",
+            "3. 保持人物动机、时间线、地点、设定和伏笔状态一致。",
+            "4. 只能迁移抽象风格特征，不得复制原文连续表达、独特比喻或可识别段落。",
+            "5. 输出原创正文后，附 self_checklist 并逐项说明是否通过。",
+        ]
+    )
+
+
+def command_write_next(args: argparse.Namespace) -> int:
+    if args.scene and args.scene not in STYLE_SCENES:
+        raise NovelReaderError("--scene 只支持：战斗、悬疑、感情、日常、说明。")
+    root = storage_root(args)
+    require_full_scope(root, args.book, "continue", args, args.after_chapter)
+    continuation_args = argparse.Namespace(
+        store=args.store,
+        book=args.book,
+        after_chapter=args.after_chapter,
+        after_chunk=args.after_chunk,
+        outline=args.outline,
+        outline_file=args.outline_file,
+        semantic=False,
+        scene=args.scene,
+        length=args.length,
+        context_chunks=5,
+        evidence_top=8,
+    )
+    packet = build_continuation_packet(root, continuation_args)
+    packet["prose_generation_prompt"] = build_prose_generation_prompt(packet)
+    if args.json:
+        print_json({"ok": True, "package": packet, "prose_generation_prompt": packet["prose_generation_prompt"]})
+    else:
+        print(render_continuation_pack(packet))
+        print("\n## Prose Generation Prompt")
+        print(packet["prose_generation_prompt"])
+    return 0
+
+
 def command_list(args: argparse.Namespace) -> int:
     root = storage_root(args)
     books = []
@@ -1789,6 +2138,33 @@ def command_list(args: argparse.Namespace) -> int:
     else:
         for book in books:
             print(f"{book['book_id']}\t{book['title']}\t{book['chapter_count']} chapters")
+    return 0
+
+
+def selection_path(root: Path) -> Path:
+    return root / "selection.json"
+
+
+def command_select(args: argparse.Namespace) -> int:
+    root = storage_root(args)
+    if args.book:
+        manifest = load_manifest(root, args.book)
+        path = selection_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "book_id": manifest["book_id"],
+            "title": manifest["title"],
+            "selected_at": now_iso(),
+        }
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print_json({"ok": True, "selected": data, "path": str(path)})
+        return 0
+
+    path = selection_path(root)
+    if not path.exists():
+        print_json({"ok": True, "selected": None})
+        return 0
+    print(path.read_text(encoding="utf-8").strip())
     return 0
 
 
@@ -1812,6 +2188,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("list", help="列出已导入书籍。")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=command_list)
+
+    p = sub.add_parser("select", help="选择或查看当前默认书籍。")
+    p.add_argument("book", nargs="?", help="要设为当前默认书籍的 book_id；省略则查看当前选择。")
+    p.set_defaults(func=command_select)
 
     p = sub.add_parser("status", help="查看阅读进度、摘要覆盖率和索引状态。")
     p.add_argument("book")
@@ -1853,17 +2233,58 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--file")
     p.set_defaults(func=command_note)
 
+    p = sub.add_parser("read-session", help="Create a governed full-book reading session.")
+    p.add_argument("book")
+    p.add_argument("--goal", choices=("full",), default="full")
+    p.add_argument("--mode", choices=("survey", "balanced", "deep"), default="balanced")
+    p.add_argument("--deep-ratio", type=float, default=0.25)
+    p.add_argument("--query")
+    p.add_argument("--focus-chapter", type=int)
+    p.add_argument("--after-chapter", type=int)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=command_read_session)
+
+    p = sub.add_parser("read-next", help="Return the next required chapter batch for a reading session.")
+    p.add_argument("session_id")
+    p.add_argument("--batch-chapters", type=int, default=1)
+    p.add_argument("--chapter", type=int)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=command_read_next)
+
+    p = sub.add_parser("submit-note", help="Submit and validate a governed chapter note.")
+    p.add_argument("session_id")
+    p.add_argument("--chapter", type=int, required=True)
+    source = p.add_mutually_exclusive_group()
+    source.add_argument("--text")
+    source.add_argument("--file")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=command_submit_note)
+
+    p = sub.add_parser("reading-status", help="Show governed reading-session coverage.")
+    p.add_argument("session_id")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=command_reading_status)
+
+    p = sub.add_parser("finalize-reading", help="Finalize a reading session once required levels are complete.")
+    p.add_argument("session_id")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=command_finalize_reading)
+
     p = sub.add_parser("outline", help="汇总章节摘要，生成情节梳理草案。")
     p.add_argument("book")
     p.add_argument("--write", action="store_true", help="写入 maps/outline.md，否则输出到终端。")
+    p.add_argument("--scope", choices=("partial", "full"), default="partial")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=command_outline)
 
     p = sub.add_parser("map", help="生成全书地图草案。")
     p.add_argument("book")
+    p.add_argument("--scope", choices=("partial", "full"), default="partial")
     p.set_defaults(func=command_map)
 
     p = sub.add_parser("analyze", help="生成写作分析报告草案。")
     p.add_argument("book")
+    p.add_argument("--scope", choices=("partial", "full"), default="partial")
     p.set_defaults(func=command_analyze)
 
     p = sub.add_parser("style", help="Distill language style evidence and original-writing guidance.")
@@ -1871,6 +2292,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scene", choices=STYLE_SCENES, help="Focus on one scene type: 战斗、悬疑、感情、日常、说明.")
     p.add_argument("--write", action="store_true", help="Write style artifacts under styles/.")
     p.add_argument("--json", action="store_true", help="Return a structured evidence packet.")
+    p.add_argument("--scope", choices=("partial", "full"), default="partial")
     p.set_defaults(func=command_style)
 
     p = sub.add_parser("continue", help="Build a continuation writing package without generating prose.")
@@ -1888,7 +2310,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--evidence-top", type=int, default=8)
     p.add_argument("--write", action="store_true", help="Write JSON/Markdown continuation packs under continuations/.")
     p.add_argument("--json", action="store_true", help="Return a structured continuation package.")
+    p.add_argument("--scope", choices=("partial", "full"), default="partial")
     p.set_defaults(func=command_continue)
+
+    p = sub.add_parser("do", help="Natural-language unified entrypoint for common novel-reader tasks.")
+    p.add_argument("book")
+    p.add_argument("request")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--semantic", action="store_true")
+    p.add_argument("--write", action="store_true")
+    p.add_argument("--after-chapter", type=int)
+    p.add_argument("--after-chunk")
+    p.add_argument("--scene", choices=STYLE_SCENES)
+    p.add_argument("--length", choices=tuple(CONTINUATION_LENGTHS), default=None)
+    p.add_argument("--top", type=int)
+    p.add_argument("--scope", choices=("partial", "full"), default=None)
+    p.set_defaults(func=command_do)
+
+    p = sub.add_parser("write-next", help="Build a continuation package plus an agent prose-generation prompt.")
+    p.add_argument("book")
+    anchor = p.add_mutually_exclusive_group()
+    anchor.add_argument("--after-chapter", type=int, help="Continue after the end of this chapter.")
+    anchor.add_argument("--after-chunk", help="Continue after this chunk id, such as c0001-001.")
+    outline = p.add_mutually_exclusive_group()
+    outline.add_argument("--outline", help="User-provided continuation outline.")
+    outline.add_argument("--outline-file", help="Read continuation outline from a UTF-8 text/Markdown file.")
+    p.add_argument("--scene", choices=STYLE_SCENES)
+    p.add_argument("--length", choices=tuple(CONTINUATION_LENGTHS), default="medium")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--scope", choices=("partial", "full"), default="partial")
+    p.set_defaults(func=command_write_next)
 
     p = sub.add_parser("embed", help="可选：用 openai-compatible embedding 增强语义检索。")
     p.add_argument("book")
@@ -1908,7 +2359,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except NovelReaderError as exc:
+    except (NovelReaderError, ValueError) as exc:
         print(f"novel-reader: {exc}", file=sys.stderr)
         return 1
 

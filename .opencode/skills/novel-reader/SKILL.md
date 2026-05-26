@@ -1,75 +1,61 @@
 ---
 name: novel-reader
-description: Read, outline, ask about, analyze, distill language style, and build continuation packages from complete long TXT/Markdown novels with a local index and source-grounded evidence.
+description: Read, search, ask about, outline, analyze, distill style from, and build continuation packages for long TXT/Markdown novels with source-grounded evidence.
 compatibility: opencode
 ---
 
 # Novel Reader
 
-Use this skill when a novel is too large for a single model context window. The bundled CLI splits TXT/Markdown novels into chapters and chunks, builds a local SQLite index, tracks chapter-summary coverage, and prepares evidence packets for plot Q&A.
+Default interface:
+
+```bash
+python ./bin/novel-reader do <book_id> "user request" --json
+```
+
+Use lower-level commands only when `do` returns `unknown`, fails, or the user explicitly asks for a specific command.
 
 ## Rules
 
 - Default to Chinese output.
-- Do not say the whole novel is fully read unless `novel-reader status` shows 100% summary coverage.
-- For plot Q&A, call `/novel-ask` or run `python ./bin/novel-reader ask ...` before answering.
-- Use chunk IDs, chapter numbers, and line ranges for factual claims.
-- If evidence is thin or coverage is incomplete, state that clearly.
-- Embedding is optional and opt-in; do not send text to an external service unless the user configured it.
-- Style distillation must produce an original-writing transfer guide, not direct imitation instructions for a specific author.
-- Continuation writing must start from a `/novel-continue` package, not from memory alone.
+- Plot claims must cite chapter, chunk, and line references.
+- If the book has an embedding index, prefer `--semantic` for search, Q&A, and continuation evidence. If semantic search fails, say so and retry without it.
+- Continuation writing must start from `write-next` or a continuation package.
+- Style distillation must be original-writing guidance, not direct imitation instructions.
+- Do not upload novel text; prefer local Qwen embedding for semantic search.
 
-## Workflow
+## Governed Full Reading
 
-1. Import the book with `/novel-ingest path/to/book.txt`.
-2. Check progress with `/novel-status <book_id>`.
-3. Read chapters with `python ./bin/novel-reader read <book_id> --chapter N`.
-4. After each chapter, record a summary with `python ./bin/novel-reader note <book_id> --chapter N --text "<summary>"`.
-5. Generate durable artifacts with `/novel-outline <book_id> --write`, `/novel-map <book_id>`, and `/novel-analyze <book_id>`.
-6. Distill language style with `/novel-style <book_id>` or `/novel-style <book_id> --scene 战斗`.
-7. Build continuation packages with `/novel-continue <book_id> --after-chapter 12 --outline "..."`.
+When the user asks to "精读完整本", "读完整本再分析", "完整拆解", "完整阅读", or requests full-book conclusions:
 
-## Summary Shape
-
-```markdown
-## 第 N 章：标题
-- 事件：
-- 人物与动机：
-- 冲突：
-- 情节因果：
-- 伏笔/回收：
-- 设定/地点/势力：
-- 时间线：
-- 写作观察：
-- 证据块：
+```bash
+python ./bin/novel-reader read-session <book_id> --goal full --mode balanced --json
+python ./bin/novel-reader read-next <session_id> --json
+python ./bin/novel-reader submit-note <session_id> --chapter N --text "<structured note>" --json
+python ./bin/novel-reader finalize-reading <session_id> --json
 ```
 
-## Answer Shape
+Call `read-next` and `submit-note` repeatedly until `final_reports_allowed=true`.
 
-For plot questions, answer with:
+Do not generate `--scope full` outline/map/analyze/style/continue output before `finalize-reading` succeeds. If the user forces skipping, use `--scope partial` and label the result as partial-scope.
 
-- direct answer
-- evidence list with chapter/chunk/line references
-- uncertainty note if the relevant chapters are not fully covered
-- suggested next reads or searches when needed
+## Reading Depth
 
-## Style Distillation
+- `survey`: whole book L1 skim coverage.
+- `balanced`: whole book L1 plus key chapters L2.
+- `deep`: whole book L1, key chapters L2, anchor/focus chapters L3.
 
-For language style requests:
+Use `balanced` by default. Use `deep` for continuation anchors or high-risk continuity work.
 
-- run `/novel-style <book_id>` for full-book style evidence
-- run `/novel-style <book_id> --scene 战斗` for a scene-specific guide
-- cite chunk, chapter, and line references
-- include language profile, scene style, original-writing transfer guide, and forbidden list
-- do not reuse source excerpts as new prose and do not generate "write like this author" prompts
+## Normal Commands
 
-## Continuation Writing
+```bash
+python ./bin/novel-reader ingest path/to/novel.txt
+python ./bin/novel-reader do <book_id> "这本书现在读到哪了" --json
+python ./bin/novel-reader do <book_id> "找一下主角第一次失败的情节" --semantic --json
+python ./bin/novel-reader do <book_id> "帮我分析战斗场景怎么写" --json
+python ./bin/novel-reader write-next <book_id> --after-chapter 12 --outline "用户大纲" --json
+```
 
-For continuation requests:
+## Output Discipline
 
-- run `/novel-continue <book_id> --after-chapter N` or `/novel-continue <book_id> --after-chunk c0001-001`
-- combine with `--outline "用户给的新剧情大纲"` when the user provides a direction
-- use `recent_context`, `plot_evidence`, `style_evidence`, and `constraints` before writing
-- follow `constraints.hard`; treat inferred constraints as guidance and uncertain constraints as warnings
-- after the continuation prose, output the self-checklist
-- do not copy source sentences or generate direct author-imitation instructions
+For plot questions and analysis, answer with a direct answer, evidence list, uncertainty note, and next reads/searches when useful. For continuation, read the package constraints and self-checklist before writing original prose.

@@ -1,318 +1,160 @@
 # Novel Reader
 
-Novel Reader is a Claude Code + OpenCode compatible plugin for reading long TXT/Markdown novels that do not fit into one model context window. It builds a local chapter/chunk index, tracks chapter-summary coverage, and helps the model produce plot outlines, plot Q&A, full-book maps, writing analysis, language style distillation, and continuation writing packages with source evidence.
-
-## What It Solves
-
-- Million-word novels cannot be read safely in one prompt.
-- Plot Q&A needs evidence, not vague memory.
-- Writing analysis needs a full-book map: chapters, characters, timelines, foreshadowing, settings, and event chains.
-- Style work needs statistics and short evidence, not direct author imitation.
-- Continuation writing needs a traceable task package before prose generation.
-- Privacy matters: the default workflow is local-only.
-
-## Layout
-
-```text
-novel-reader/
-  .claude-plugin/plugin.json
-  skills/novel-reader/SKILL.md
-  .opencode/skills/novel-reader/SKILL.md
-  .opencode/commands/novel-*.md
-  .opencode/plugins/novel-reader.ts
-  bin/novel-reader
-  bin/novel-reader.cmd
-  bin/novel-reader.ps1
-  bin/start-novel-reader.ps1
-  bin/start-web.ps1
-  src/novel_reader/
-```
-
-The Python CLI is the shared core. Claude Code and OpenCode use thin adapters that call the same commands.
-
-## Requirements
-
-- Python 3.9+
-- Flask 3.0+ for the optional local Web console
-- TXT/Markdown input files only in v0.1
+Novel Reader is a Claude Code + OpenCode compatible toolkit for reading long TXT/Markdown novels with a local chapter/chunk index, source-grounded evidence, optional semantic search, style analysis, continuation packages, and governed full-reading sessions.
 
 ## Quick Start
 
+Normal users only need import plus the natural-language entrypoint:
+
 ```bash
 python ./bin/novel-reader ingest path/to/novel.txt
-python ./bin/novel-reader status <book_id>
-python ./bin/novel-reader read <book_id> --chapter 1
-python ./bin/novel-reader search <book_id> "关键人物或情节"
-python ./bin/novel-reader ask <book_id> "某个伏笔在哪里回收？"
+python ./bin/novel-reader do <book_id> "你的需求"
 ```
 
-Generate durable artifacts:
+Examples:
 
 ```bash
-python ./bin/novel-reader outline <book_id> --write
-python ./bin/novel-reader map <book_id>
-python ./bin/novel-reader analyze <book_id>
-python ./bin/novel-reader style <book_id> --write
+python ./bin/novel-reader do <book_id> "这本书现在读到哪了"
+python ./bin/novel-reader do <book_id> "找一下主角第一次失败的情节" --semantic
+python ./bin/novel-reader do <book_id> "帮我分析战斗场景怎么写"
+python ./bin/novel-reader do <book_id> "接第12章后面续写，短一点，偏悬疑"
+python ./bin/novel-reader write-next <book_id> --after-chapter 12 --outline "主角潜入北塔" --json
 ```
 
 Local data is stored under `.novel-reader/<book_id>/`.
 
+## Governed Full Reading
+
+For requests like "精读完整本", "读完整本再分析", or "完整拆解", use a reading session. This prevents an agent from reading only a few chapters and then producing full-book conclusions.
+
+```bash
+python ./bin/novel-reader read-session <book_id> --goal full --mode balanced --json
+python ./bin/novel-reader read-next <session_id> --json
+python ./bin/novel-reader submit-note <session_id> --chapter 1 --text "<structured note>" --json
+python ./bin/novel-reader reading-status <session_id> --json
+python ./bin/novel-reader finalize-reading <session_id> --json
+```
+
+Reading depth:
+
+- `survey`: whole book L1 skim coverage.
+- `balanced`: whole book L1 plus key chapters L2.
+- `deep`: whole book L1, key chapters L2, anchor/focus chapters L3.
+
+Full-scope reports are guarded:
+
+```bash
+python ./bin/novel-reader outline <book_id> --scope full --json
+python ./bin/novel-reader analyze <book_id> --scope full
+python ./bin/novel-reader continue <book_id> --after-chapter 12 --scope full --json
+```
+
+If required coverage is missing, the command refuses full-scope output and returns the current coverage, missing chapters, and the next `read-next` command to run.
+
+## What It Does
+
+- Indexes TXT/Markdown novels into chapters and chunks.
+- Tracks legacy summary coverage and governed L1/L2/L3 reading coverage.
+- Answers plot questions with chapter/chunk/line evidence.
+- Builds outlines, book maps, writing analysis reports, style evidence, and continuation packages.
+- Keeps normal work local-first; semantic search is optional and can use a local Qwen embedding service.
+
 ## One-Click Startup
 
-Use the launcher to check or start local Qwen Embedding and then start Claude Code or OpenCode with the right environment variables.
+Use the launcher to check or start local Qwen Embedding and then start Claude Code, OpenCode, or only the embedding service.
 
 ```powershell
 .\bin\start-novel-reader.ps1
 ```
 
-If Windows blocks PowerShell scripts, run:
+Useful variants:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\bin\start-novel-reader.ps1
-```
-
-Defaults:
-
-- client: `claude`
-- Claude permission mode: ask interactively between normal Claude and `claude --dangerously-skip-permissions`
-- embedding URL: `http://127.0.0.1:8081/v1`
-- model name: `qwen3-embedding-0.6b`
-- local config: `.novel-reader-local/config.json`
-
-Other examples:
-
-```powershell
-.\bin\start-novel-reader.ps1 -Client opencode
 .\bin\start-novel-reader.ps1 -Client none
+.\bin\start-novel-reader.ps1 -Client opencode
 .\bin\start-novel-reader.ps1 -NoEmbedding
 .\bin\start-novel-reader.ps1 -ModelPath "C:\Users\xsjhxs\.cache\modelscope\hub\models\Qwen\Qwen3-Embedding-0.6B"
-.\bin\start-novel-reader.ps1 -Port 8081 -BatchSize 4
-.\bin\start-novel-reader.ps1 -ClaudePermissionMode normal
-.\bin\start-novel-reader.ps1 -ClaudePermissionMode dangerous
 ```
-
-`-ClaudePermissionMode dangerous` starts `claude --dangerously-skip-permissions` only after you type `DANGEROUS` to confirm. Use it only in a trusted workspace.
-
-If the model is not found, the launcher asks for a model path. Press Enter to continue without embedding. Keyword search, plot Q&A, writing analysis, style distillation, and continuation packages still work without embedding.
-
-The launcher only connects to `127.0.0.1` by default. Do not put real API keys or private model paths in committed files.
-
-## Two Claude Modes
-
-Novel Reader supports two Claude Code workflows.
-
-Mode 1: start Claude in plugin mode from PowerShell:
-
-```powershell
-.\bin\start-claude-plugin.ps1
-.\bin\start-claude-plugin.ps1 -ClaudePermissionMode dangerous
-.\bin\start-claude-plugin.ps1 -ModelPath "C:\Users\xsjhxs\.cache\modelscope\hub\models\Qwen\Qwen3-Embedding-0.6B"
-```
-
-This checks or starts local Qwen Embedding, then opens Claude Code with the Novel Reader plugin available.
-
-Mode 2: open the Web panel from inside Claude Code:
-
-```text
-/novel-web
-/novel-web --port 8770
-/novel-web --no-embedding
-/novel-web --dangerous
-```
-
-The `/novel-web` command starts the local Web console in the background, opens the browser panel, and enables the Claude bridge for the page. If the requested port is busy, the launcher picks the next available local port and prints the final URL.
 
 ## Local Web Console
 
-The Web console is a local browser UI for common work: import, book list, status, reading, search, plot Q&A evidence packages, outline/map/analyze, language style distillation, continuation packages, and embedding checks.
-
-Install the package or Flask first:
+The optional Flask web console provides import, book list, status, reading, search, Q&A evidence, documents, style analysis, continuation packages, and Claude bridge features.
 
 ```powershell
 pip install -e .
-```
-
-Then start the console:
-
-```powershell
 .\bin\start-web.ps1 -OpenBrowser
 ```
 
-Open manually if needed:
+Default URL:
 
 ```text
 http://127.0.0.1:8765
 ```
 
-Other examples:
+## Claude Code And OpenCode
 
-```powershell
-.\bin\start-web.ps1
-.\bin\start-web.ps1 -Port 8770 -OpenBrowser
-.\bin\start-web.ps1 -NoEmbedding
-.\bin\start-web.ps1 -ModelPath "C:\Users\xsjhxs\.cache\modelscope\hub\models\Qwen\Qwen3-Embedding-0.6B"
-.\bin\start-web.ps1 -EnableClaudeChat -OpenBrowser
-```
+Claude Code plugin files live under `.claude-plugin/` and `skills/`. OpenCode adapters live under `.opencode/`.
 
-The console only binds to `127.0.0.1` by default. If local Qwen Embedding is already running on `8081`, semantic features are enabled automatically. If it is not running, the launcher tries to start it from `-ModelPath`, `QWEN_EMBED_MODEL_PATH`, saved `.novel-reader-local/config.json`, or the common ModelScope cache path. If no model is found, the page still supports keyword search and all local evidence-package workflows.
-
-To start Qwen Embedding before opening the Web console:
-
-```powershell
-.\bin\start-novel-reader.ps1 -Client none
-.\bin\start-web.ps1 -OpenBrowser
-```
-
-Web document viewer:
-
-- The Documents tab lists generated `maps/`, `reports/`, `styles/`, `continuations/`, and `summaries/` files.
-- Markdown files can be previewed in the browser, viewed as source, or downloaded.
-- The web API refuses absolute paths and `..` traversal, so it cannot read arbitrary local files.
-
-Claude bridge:
-
-```powershell
-.\bin\start-web.ps1 -EnableClaudeChat -ClaudeMode both -OpenBrowser
-.\bin\start-web.ps1 -EnableClaudeChat -ClaudePermissionMode dangerous -OpenBrowser
-```
-
-The Claude tab calls the local `claude` CLI with fixed command templates:
-
-- one-shot mode: `claude -p --output-format json <prompt>`
-- continue mode: `claude -c -p --output-format json <prompt>`
-
-Dangerous mode adds `--dangerously-skip-permissions` only after the launcher asks you to type `DANGEROUS`. Attached documents and evidence packages may be sent through Claude Code, so keep the server bound to `127.0.0.1`.
-
-## Continuation Packages
-
-`continue` builds a continuation task package. It does not generate prose by itself.
+Daily agent usage should call:
 
 ```bash
-python ./bin/novel-reader continue <book_id> --after-chapter 12 --json
-python ./bin/novel-reader continue <book_id> --after-chunk c0012-004 --json
-python ./bin/novel-reader continue <book_id> --after-chapter 12 --outline "主角潜入北塔" --json
-python ./bin/novel-reader continue <book_id> --outline-file next-arc.md --scene 悬疑 --semantic --json
-python ./bin/novel-reader continue <book_id> --after-chapter 12 --write
+python ./bin/novel-reader do <book_id> "用户需求" --json
 ```
 
-The package includes:
+For governed full reading, agents must loop through `read-next` and `submit-note`, then wait for `finalize-reading` before issuing `--scope full` reports.
 
-- `recent_context`: short excerpts before the continuation point
-- `plot_evidence`: retrieved plot, character, setting, and foreshadowing evidence
-- `style_evidence`: style statistics and scene evidence
-- `constraints`: hard, inferred, uncertain, and copyright-boundary rules
-- `draft_instructions`: how Claude/OpenCode should write the continuation
-- `self_checklist`: checks to run after writing prose
+## Advanced Commands
 
-`--write` creates timestamped files and latest aliases under `.novel-reader/<book_id>/continuations/`.
-
-## Language Style Distillation
-
-Use `style` to collect local statistics and short source evidence for an original-writing transfer guide:
-
-```bash
-python ./bin/novel-reader style <book_id>
-python ./bin/novel-reader style <book_id> --scene 战斗
-python ./bin/novel-reader style <book_id> --json
-python ./bin/novel-reader style <book_id> --write
-```
-
-`--write` creates:
-
-- `.novel-reader/<book_id>/styles/style-profile.md`
-- `.novel-reader/<book_id>/styles/scene-styles.md`
-- `.novel-reader/<book_id>/styles/style-guide.md`
-
-The report covers sentence rhythm, paragraph density, punctuation, dialogue ratio, high-frequency word fields, short excerpts, and scene profiles for 战斗、悬疑、感情、日常、说明. It is for original writing guidance; do not use it to copy source passages or generate direct "write like this author" prompts.
-
-## Claude Code
-
-Use this folder as a Claude Code plugin directory. The plugin contains:
-
-- `.claude-plugin/plugin.json`
-- `skills/novel-reader/SKILL.md`
-- `bin/novel-reader`
-
-The Skill tells Claude Code to read chapter by chapter, cite chunk evidence, produce original-writing style guides, and build continuation packages before writing prose.
-
-## OpenCode
-
-Copy or keep this folder as an OpenCode project/plugin folder. It provides:
-
-- `.opencode/skills/novel-reader/SKILL.md`
-- `.opencode/commands/novel-ingest.md`
-- `.opencode/commands/novel-status.md`
-- `.opencode/commands/novel-outline.md`
-- `.opencode/commands/novel-ask.md`
-- `.opencode/commands/novel-map.md`
-- `.opencode/commands/novel-analyze.md`
-- `.opencode/commands/novel-style.md`
-- `.opencode/commands/novel-continue.md`
-- `.opencode/plugins/novel-reader.ts`
-
-Example OpenCode commands:
+Most users should use `ingest + do`. These lower-level commands remain available for scripts, debugging, and precise control.
 
 ```text
-/novel-ingest path/to/novel.txt
-/novel-status <book_id>
-/novel-ask <book_id> "主角为什么背叛组织？"
-/novel-style <book_id> --scene 战斗
-/novel-continue <book_id> --after-chapter 12 --outline "主角潜入北塔"
+ingest <file>                         Import TXT/Markdown and build index
+do <book> "<request>"                 Route a natural-language request
+read-session <book>                   Create governed full-reading session
+read-next <session_id>                Return next required chapter batch
+submit-note <session_id> --chapter N  Validate and store governed chapter note
+reading-status <session_id>           Show L1/L2/L3 coverage
+finalize-reading <session_id>         Allow full reports only when complete
+write-next <book>                     Build continuation package plus prose prompt
+list                                  List imported books
+select [book]                         Select or show the default book
+status <book>                         Show coverage and index status
+read <book> --chapter N               Read a chapter
+read <book> --chunk c0001-001         Read one chunk
+search <book> "<query>"               Search source text
+ask <book> "<question>"               Build a plot Q&A evidence packet
+note <book> --chapter N               Store a legacy chapter summary
+outline <book> --scope partial|full   Generate plot outline
+map <book> --scope partial|full       Generate book map
+analyze <book> --scope partial|full   Generate writing analysis
+style <book> --scope partial|full     Distill language style evidence
+continue <book> --after-chapter N     Build a continuation package
+embed <book>                          Optional semantic index
 ```
 
-## Reading Policy
+## Semantic Search
 
-The plugin is designed around a coverage ledger:
+Keyword search and SQLite FTS work locally by default. Semantic search requires an embedding index and a running OpenAI-compatible embedding endpoint for query vectors.
 
-1. `ingest` splits the book into chapters and chunks.
-2. The model reads chapters with `read`.
-3. The model records summaries with `note`.
-4. `status` reports coverage.
-5. Q&A uses `ask` or `search` for evidence.
-6. Whole-book conclusions require complete or explicitly scoped coverage.
-7. Continuation prose requires a `continue` package first.
+For local Qwen:
 
-## Optional Embedding
-
-Keyword search and SQLite FTS work locally by default. Semantic search is opt-in.
-
-Set:
-
-```bash
-NOVEL_READER_EMBED_API_KEY=...
-NOVEL_READER_EMBED_BASE_URL=http://127.0.0.1:8081/v1
-NOVEL_READER_EMBED_MODEL=qwen3-embedding-0.6b
-```
-
-Then run:
-
-```bash
+```powershell
+$env:NOVEL_READER_EMBED_API_KEY="local"
+$env:NOVEL_READER_EMBED_BASE_URL="http://127.0.0.1:8081/v1"
+$env:NOVEL_READER_EMBED_MODEL="qwen3-embedding-0.6b"
 python ./bin/novel-reader embed <book_id> --provider openai-compatible
-python ./bin/novel-reader search <book_id> "人物动机变化" --semantic
-python ./bin/novel-reader continue <book_id> --after-chapter 12 --outline "新剧情" --semantic --json
 ```
 
-If embedding is not configured, all core local features still work.
+Then:
 
-## Main Commands
-
-```text
-ingest <file>                      Import TXT/Markdown and build index
-list                               List imported books
-status <book>                      Show coverage and index status
-read <book> --chapter N            Read a chapter
-read <book> --chunk c0001-001      Read one chunk
-search <book> "<query>"            Search source text
-ask <book> "<question>"            Build a plot Q&A evidence packet
-note <book> --chapter N            Store a model-written chapter summary
-outline <book> --write             Generate plot outline artifact
-map <book>                         Generate full-book map artifact
-analyze <book>                     Generate writing-analysis artifact
-style <book>                       Distill language style evidence
-continue <book> --after-chapter N  Build a continuation package
-embed <book>                       Optional semantic index
+```bash
+python ./bin/novel-reader do <book_id> "找一下人物动机变化" --semantic
 ```
 
-## Privacy
+## Safety Notes
 
-By default, the novel text stays on disk and is indexed locally. The only command that can call an external service is `embed`, and it requires explicit environment configuration. `style` and `continue` read the local index and emit short excerpts with source positions.
+- Plot claims should cite source evidence.
+- Full-book conclusions require governed reading coverage when using `--scope full`.
+- Continuation writing should start from `continue` or `write-next`; the CLI does not call an external writing model.
+- Style distillation outputs transferable original-writing guidance, not direct imitation prompts.
+- Do not commit `.novel-reader/`, `.novel-reader-local/`, model paths, API keys, or novel text.
