@@ -84,7 +84,14 @@ def scope_value(args: argparse.Namespace) -> str:
 def require_full_scope(root: Path, book_id: str, report_type: str, args: argparse.Namespace, anchor_chapter: int | None = None) -> None:
     if scope_value(args) != "full":
         return
-    ok, payload = full_scope_guard(root, book_id, report_type, anchor_chapter, getattr(args, "allow_unfinalized", False))
+    ok, payload = full_scope_guard(
+        root,
+        book_id,
+        report_type,
+        anchor_chapter,
+        getattr(args, "allow_unfinalized", False),
+        getattr(args, "session_id", None),
+    )
     if ok:
         return
     if getattr(args, "json", False):
@@ -1892,7 +1899,14 @@ def command_predict(args: argparse.Namespace) -> int:
         raise NovelReaderError("--context-chunks 必须大于 0。")
     root = storage_root(args)
     if args.scope_mode == "full":
-        ok, payload = full_scope_guard(root, args.book, "predict", args.anchor_chapter, getattr(args, "allow_unfinalized", False))
+        ok, payload = full_scope_guard(
+            root,
+            args.book,
+            "predict",
+            args.anchor_chapter,
+            getattr(args, "allow_unfinalized", False),
+            getattr(args, "session_id", None),
+        )
         if not ok:
             if args.json:
                 raise NovelReaderJsonError(payload)

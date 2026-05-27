@@ -353,6 +353,8 @@ def build_prediction_packet(root: Path, book: str, args: Any) -> dict[str, Any]:
     open_threads = extract_open_threads(summaries, evidence)
     insufficient = len(evidence) < 3 or coverage < 20
     warnings = ["这是基于现有文本的推测，不是作者真实后续。"]
+    if bool(getattr(args, "semantic", False)):
+        warnings.append("semantic requested but predict currently uses local heuristic scoring; semantic evidence retrieval is not applied in predict yet.")
     if insufficient:
         warnings.append("摘要覆盖或证据数量不足，预测可靠性会下降。")
 

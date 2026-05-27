@@ -20,7 +20,7 @@ from . import reading_session
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
-DOCUMENT_DIRS = ("maps", "reports", "styles", "continuations", "summaries")
+DOCUMENT_DIRS = ("maps", "reports", "styles", "continuations", "predictions", "summaries")
 DOCUMENT_EXTS = {".md", ".json", ".txt"}
 CLAUDE_TIMEOUT_SECONDS = 240
 MAX_CLAUDE_CONTEXT_CHARS = 80000

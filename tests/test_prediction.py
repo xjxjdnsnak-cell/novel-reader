@@ -71,8 +71,11 @@ def import_prediction_fixture(tmp_path: Path) -> tuple[Path, str]:
 
 def test_predict_intent_keywords_do_not_override_continue():
     assert classify_request("这本未完结小说后面可能怎么发展？").intent == "predict"
+    assert classify_request("后续剧情可能是什么？").intent == "predict"
     assert classify_request("主角会不会背叛宗门？").intent == "predict"
     assert classify_request("接第12章后面续写").intent == "continue"
+    assert classify_request("续写第12章后面的剧情").intent == "continue"
+    assert classify_request("写下一章").intent == "continue"
 
 
 def test_predict_cli_json_returns_evidence_based_predictions(tmp_path: Path):
@@ -143,6 +146,21 @@ def test_predict_write_creates_latest_markdown_and_json(tmp_path: Path):
         assert path.exists()
 
 
+def test_predict_write_documents_are_visible_in_web_documents(tmp_path: Path, monkeypatch):
+    store, book = import_book(tmp_path)
+    run_cli(store, "predict", book, "后续剧情可能怎么发展？", "--write", "--json")
+    monkeypatch.setenv("NOVEL_READER_HOME", str(store))
+    app = make_app()
+    client = app.test_client()
+
+    response = client.get(f"/api/documents?book={book}")
+
+    assert response.status_code == 200
+    paths = {item["path"] for item in response.get_json()["documents"]}
+    assert "predictions/prediction-latest.md" in paths
+    assert "predictions/prediction-latest.json" in paths
+
+
 def test_predict_full_scope_requires_finalized_balanced_session(tmp_path: Path):
     store, book = import_book(tmp_path)
     session = complete_balanced_session(store, book)
@@ -157,6 +175,50 @@ def test_predict_full_scope_requires_finalized_balanced_session(tmp_path: Path):
     allowed = load_json(run_cli(store, "predict", book, "--scope-mode", "full", "--json"))
     assert allowed["ok"] is True
     assert allowed["predictions"]
+
+
+def test_predict_full_scope_uses_specified_session_id(tmp_path: Path):
+    store, book = import_book(tmp_path)
+    finalized = complete_balanced_session(store, book)
+    run_cli(store, "finalize-reading", finalized["session_id"], "--json")
+    newer_unfinalized = load_json(run_cli(store, "read-session", book, "--mode", "balanced", "--json"))
+
+    allowed = run_cli(
+        store,
+        "predict",
+        book,
+        "--scope-mode",
+        "full",
+        "--session-id",
+        finalized["session_id"],
+        "--json",
+    )
+
+    payload = json.loads(allowed.stdout)
+    assert payload["ok"] is True
+    assert payload["predictions"]
+
+    blocked = run_cli(
+        store,
+        "predict",
+        book,
+        "--scope-mode",
+        "full",
+        "--session-id",
+        newer_unfinalized["session_id"],
+        "--json",
+        check=False,
+    )
+    assert blocked.returncode != 0
+
+
+def test_predict_semantic_warns_that_prediction_uses_local_heuristics(tmp_path: Path):
+    store, book = import_book(tmp_path)
+
+    data = load_json(run_cli(store, "predict", book, "后续剧情可能怎么发展？", "--semantic", "--json"))
+
+    assert data["prediction_goal"]["semantic"] is True
+    assert any("semantic requested but predict currently uses local heuristic scoring" in item for item in data["warnings"])
 
 
 def test_web_predict_api_partial_and_full_scope_guard(tmp_path: Path, monkeypatch):

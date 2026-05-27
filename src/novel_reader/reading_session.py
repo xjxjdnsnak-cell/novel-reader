@@ -688,8 +688,33 @@ def scope_status_for_book(root: Path, book_id: str) -> dict[str, Any] | None:
     return calculate_status(root, session["session_id"])
 
 
-def full_scope_guard(root: Path, book_id: str, report_type: str, anchor_chapter: int | None = None, allow_unfinalized: bool = False) -> tuple[bool, dict[str, Any]]:
-    status = scope_status_for_book(root, book_id)
+def full_scope_guard(
+    root: Path,
+    book_id: str,
+    report_type: str,
+    anchor_chapter: int | None = None,
+    allow_unfinalized: bool = False,
+    session_id: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if session_id:
+        try:
+            status = calculate_status(root, session_id)
+        except ValueError:
+            return False, full_scope_error(
+                f"Reading session not found: {session_id}",
+                None,
+                "all",
+                f"novel-reader read-session {book_id} --goal full --mode balanced --json",
+            )
+        if status["book_id"] != book_id:
+            return False, full_scope_error(
+                f"Reading session {session_id} belongs to book {status['book_id']}, not {book_id}.",
+                status,
+                "all",
+                f"novel-reader read-session {book_id} --goal full --mode balanced --json",
+            )
+    else:
+        status = scope_status_for_book(root, book_id)
     if not status:
         return False, full_scope_error(
             "No reading session found for full-scope output.",
