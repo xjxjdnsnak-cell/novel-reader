@@ -707,6 +707,10 @@ def full_scope_guard(root: Path, book_id: str, report_type: str, anchor_chapter:
         if mode not in {"balanced", "deep"} or not status["required_coverage_complete"]:
             return False, blocked_payload(status, "Full writing analysis requires a completed balanced/deep reading session.", status["missing_chapters"])
 
+    if report_type == "predict":
+        if mode not in {"balanced", "deep"} or not status["required_coverage_complete"]:
+            return False, blocked_payload(status, "Full prediction requires a completed balanced/deep reading session.", status["missing_chapters"])
+
     if report_type == "style":
         if mode not in {"balanced", "deep"} or status["l2_coverage_percent"] <= 0 or not status["required_coverage_complete"]:
             return False, blocked_payload(status, "Full style distillation requires completed L2/L3 sample chapters.", status["missing_chapters"])

@@ -15,6 +15,7 @@ INTENTS = {
     "analyze",
     "style",
     "continue",
+    "predict",
     "embed",
     "unknown",
 }
@@ -136,6 +137,18 @@ def clean_query(text: str) -> str:
     return cleaned or text.strip()
 
 
+def extract_prediction_scope(text: str) -> str:
+    if any(word in text for word in ("伏笔", "回收", "线索")):
+        return "foreshadowing"
+    if any(word in text for word in ("结局", "最终", "收束")):
+        return "ending"
+    if any(word in text for word in ("黑化", "背叛", "会不会死", "牺牲", "人物")):
+        return "character"
+    if any(word in text for word in ("下一段", "下一阶段", "接下来", "之后会怎样")):
+        return "next-arc"
+    return "general"
+
+
 def base_args(text: str) -> dict[str, Any]:
     args: dict[str, Any] = {}
     lowered = normalize_text(text)
@@ -182,6 +195,34 @@ def classify_request(text: str) -> IntentResult:
         word in lowered for word in ("continue", "write next", "next chapter")
     ):
         return result("continue", 0.93, "continuation keyword matched", raw, outline=extract_explicit_outline(raw))
+
+    if any(
+        word in raw
+        for word in (
+            "预测",
+            "猜",
+            "猜测",
+            "后续剧情",
+            "之后会怎样",
+            "接下来会发生什么",
+            "未完结",
+            "结局可能",
+            "伏笔会怎么回收",
+            "会不会黑化",
+            "会不会背叛",
+            "会不会死",
+            "后面怎么发展",
+            "可能走向",
+        )
+    ) or any(word in lowered for word in ("predict", "prediction", "what happens next", "future plot")):
+        return result(
+            "predict",
+            0.9,
+            "prediction keyword matched",
+            raw,
+            question=query,
+            prediction_scope=extract_prediction_scope(raw),
+        )
 
     if any(word in raw for word in ("风格", "文风", "语言", "场景怎么写", "写法", "蒸馏")) or any(
         word in lowered for word in ("style", "voice", "tone")

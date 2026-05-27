@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .intent_router import IntentResult, classify_request
+from .predictor import build_prediction_packet, render_prediction_packet, write_prediction_packet
 from .reading_session import (
     build_read_next,
     calculate_status,
@@ -1884,6 +1885,28 @@ def command_continue(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_predict(args: argparse.Namespace) -> int:
+    if args.top < 1:
+        raise NovelReaderError("--top 必须大于 0。")
+    if args.context_chunks < 1:
+        raise NovelReaderError("--context-chunks 必须大于 0。")
+    root = storage_root(args)
+    if args.scope_mode == "full":
+        ok, payload = full_scope_guard(root, args.book, "predict", args.anchor_chapter, getattr(args, "allow_unfinalized", False))
+        if not ok:
+            if args.json:
+                raise NovelReaderJsonError(payload)
+            raise NovelReaderError(payload.get("error", {}).get("message") or payload.get("reason") or "Full-scope prediction is not allowed.")
+    packet = build_prediction_packet(root, args.book, args)
+    if args.write:
+        packet["output_paths"] = write_prediction_packet(root, args.book, packet)
+    if args.json:
+        print_json(packet)
+    else:
+        print(render_prediction_packet(packet))
+    return 0
+
+
 def command_embed(args: argparse.Namespace) -> int:
     root = storage_root(args)
     manifest = load_manifest(root, args.book)
@@ -2041,6 +2064,23 @@ def route_namespace(args: argparse.Namespace, route: IntentResult) -> tuple[Any 
             write=args.write,
             json=args.json,
             scope=scope,
+            allow_unfinalized=False,
+        )
+    if route.intent == "predict":
+        return command_predict, argparse.Namespace(
+            **common,
+            question=suggested.get("question") or query,
+            scope=suggested.get("prediction_scope") or "general",
+            horizon="next-arc",
+            anchor_chapter=after_chapter,
+            anchor_chunk=after_chunk,
+            top=top,
+            context_chunks=5,
+            semantic=args.semantic,
+            write=args.write,
+            json=args.json,
+            scope_mode=scope,
+            session_id=None,
             allow_unfinalized=False,
         )
     if route.intent == "embed":
@@ -2315,6 +2355,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", choices=("partial", "full"), default="partial")
     p.add_argument("--allow-unfinalized", action="store_true")
     p.set_defaults(func=command_style)
+
+    p = sub.add_parser("predict", help="Build an evidence-grounded future-plot prediction packet without generating prose.")
+    p.add_argument("book")
+    p.add_argument("question", nargs="?", default=None)
+    p.add_argument("--scope", choices=("general", "next-arc", "character", "foreshadowing", "ending"), default="general")
+    p.add_argument("--horizon", choices=("next-3-chapters", "next-arc", "ending"), default="next-arc")
+    p.add_argument("--anchor-chapter", type=int)
+    p.add_argument("--anchor-chunk")
+    p.add_argument("--top", type=int, default=8)
+    p.add_argument("--context-chunks", type=int, default=5)
+    p.add_argument("--semantic", action="store_true")
+    p.add_argument("--write", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--scope-mode", choices=("partial", "full"), default="partial")
+    p.add_argument("--session-id")
+    p.add_argument("--allow-unfinalized", action="store_true")
+    p.set_defaults(func=command_predict)
 
     p = sub.add_parser("continue", help="Build a continuation writing package without generating prose.")
     p.add_argument("book")

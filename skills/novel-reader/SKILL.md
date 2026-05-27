@@ -18,6 +18,8 @@ Use lower-level commands only when `do` returns `unknown`, fails, or the user ex
 - Default to Chinese output unless the user asks otherwise.
 - Plot claims must cite chapter, chunk, and line references from Novel Reader evidence.
 - If the book has an embedding index, prefer `--semantic` for search, Q&A, and continuation evidence; if semantic search fails, retry without it and say so.
+- For future-plot questions such as "猜后续剧情", "预测发展", "结局可能", "伏笔会怎么回收", or "会不会黑化/背叛/死亡", use `predict`, not `continue`.
+- Prediction output must include probability, evidence, counter-evidence or uncertainty, and must not claim to know the author's real future plot.
 - Continuation prose must start from `write-next` or a continuation package; do not continue from memory alone.
 - Style distillation must produce original-writing guidance, not direct imitation prompts for a specific author.
 - Do not upload novel text. Local Qwen embedding is preferred when semantic search is needed.
@@ -71,6 +73,7 @@ Routine requests:
 python ./bin/novel-reader do <book_id> "这本书现在读到哪了" --json
 python ./bin/novel-reader do <book_id> "找一下主角第一次失败的情节" --semantic --json
 python ./bin/novel-reader do <book_id> "帮我分析战斗场景怎么写" --json
+python ./bin/novel-reader predict <book_id> "后续剧情可能怎么发展？" --json
 python ./bin/novel-reader do <book_id> "接第12章后面续写，短一点，偏悬疑" --semantic --json
 ```
 
@@ -85,5 +88,7 @@ python ./bin/novel-reader continue <book_id> --after-chapter N --scope full --js
 ## Answer Shape
 
 For plot Q&A and analysis, include direct answer, evidence list, uncertainty note, and next reads/searches when needed.
+
+For prediction, output a prediction package or summary with probabilities, source evidence, risk, watchlist, and a disclaimer that this is not author-confirmed future content.
 
 For continuation, read the package constraints and self-checklist before writing original prose, then include a self-checklist after the prose.

@@ -6,6 +6,10 @@ from novel_reader.web_app import make_app
 from test_reading_session import import_book, load_json, run_cli, valid_l1_note, valid_l2_note
 
 
+def csrf_headers(app) -> dict[str, str]:
+    return {"X-Novel-Reader-Token": app.config["NOVEL_READER_CSRF_TOKEN"]}
+
+
 def complete_session_notes(store: Path, session: dict) -> None:
     for chapter in range(1, 5):
         packet = load_json(run_cli(store, "read-next", session["session_id"], "--chapter", str(chapter), "--json"))
@@ -21,7 +25,7 @@ def test_web_reading_session_flow(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("NOVEL_READER_WEB_TOKEN", "test-token")
     app = make_app()
     client = app.test_client()
-    headers = {"X-Novel-Reader-Token": "test-token"}
+    headers = csrf_headers(app)
 
     created = client.post(
         "/api/reading/session",
@@ -70,7 +74,7 @@ def test_web_old_action_analyze_uses_full_scope_guard(tmp_path: Path, monkeypatc
     complete_session_notes(store, session)
     app = make_app()
     client = app.test_client()
-    headers = {"X-Novel-Reader-Token": "test-token"}
+    headers = csrf_headers(app)
 
     blocked = client.post(
         "/api/action/analyze",
@@ -95,7 +99,7 @@ def test_web_style_uses_full_scope_guard(tmp_path: Path, monkeypatch):
     complete_session_notes(store, session)
     app = make_app()
     client = app.test_client()
-    headers = {"X-Novel-Reader-Token": "test-token"}
+    headers = csrf_headers(app)
 
     blocked = client.post(
         "/api/style",
@@ -117,7 +121,7 @@ def test_web_continue_uses_full_scope_guard(tmp_path: Path, monkeypatch):
     session = load_json(run_cli(store, "read-session", book, "--mode", "deep", "--after-chapter", "3", "--json"))
     app = make_app()
     client = app.test_client()
-    headers = {"X-Novel-Reader-Token": "test-token"}
+    headers = csrf_headers(app)
 
     blocked = client.post(
         "/api/continue",

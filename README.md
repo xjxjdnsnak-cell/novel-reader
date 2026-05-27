@@ -18,6 +18,8 @@ python ./bin/novel-reader do <book_id> "这本书现在读到哪了"
 python ./bin/novel-reader do <book_id> "找一下主角第一次失败的情节" --semantic
 python ./bin/novel-reader do <book_id> "帮我分析战斗场景怎么写"
 python ./bin/novel-reader do <book_id> "接第12章后面续写，短一点，偏悬疑"
+python ./bin/novel-reader predict <book_id> "后续剧情可能怎么发展？" --json
+python ./bin/novel-reader do <book_id> "这个未完结小说后面可能怎么写？"
 python ./bin/novel-reader write-next <book_id> --after-chapter 12 --outline "主角潜入北塔" --json
 ```
 
@@ -64,7 +66,7 @@ Use `full_scope_allowed` for new integrations. `final_reports_allowed` is kept a
 - Indexes TXT/Markdown novels into chapters and chunks.
 - Tracks legacy summary coverage and governed L1/L2/L3 reading coverage.
 - Answers plot questions with chapter/chunk/line evidence.
-- Builds outlines, book maps, writing analysis reports, style evidence, and continuation packages.
+- Builds outlines, book maps, writing analysis reports, style evidence, future-plot prediction packets, and continuation packages.
 - Keeps normal work local-first; semantic search is optional and can use a local Qwen embedding service.
 
 ## One-Click Startup
@@ -136,6 +138,7 @@ outline <book> --scope partial|full   Generate plot outline
 map <book> --scope partial|full       Generate book map
 analyze <book> --scope partial|full   Generate writing analysis
 style <book> --scope partial|full     Distill language style evidence
+predict <book> [question]             Predict future plot directions with evidence, probability, and uncertainty
 continue <book> --after-chapter N     Build a continuation package
 embed <book>                          Optional semantic index
 ```
@@ -183,6 +186,7 @@ TODO backend options:
 
 - Plot claims should cite source evidence.
 - Full-book conclusions require governed reading coverage when using `--scope full`.
+- Future-plot prediction uses `predict`; it is probabilistic analysis, not author truth and not prose continuation.
 - Continuation writing should start from `continue` or `write-next`; the CLI does not call an external writing model.
 - Style distillation outputs transferable original-writing guidance, not direct imitation prompts.
 - Do not commit `.novel-reader/`, `.novel-reader-local/`, model paths, API keys, or novel text.

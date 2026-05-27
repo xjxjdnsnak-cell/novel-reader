@@ -216,6 +216,28 @@ def make_app() -> Flask:
         packet = run_command_json(cli.command_continue, **vars(args))
         return ok(with_document_refs(args.book, packet))
 
+    @app.post("/api/predict")
+    def api_predict():
+        payload = request_json()
+        packet = run_command_json(
+            cli.command_predict,
+            book=required_payload(payload, "book"),
+            question=payload.get("question") or None,
+            scope=payload.get("scope") or "general",
+            horizon=payload.get("horizon") or "next-arc",
+            anchor_chapter=maybe_int(payload.get("anchor_chapter")),
+            anchor_chunk=payload.get("anchor_chunk") or None,
+            top=int(payload.get("top") or 8),
+            context_chunks=int(payload.get("context_chunks") or 5),
+            semantic=bool(payload.get("semantic")),
+            write=bool(payload.get("write")),
+            json=True,
+            scope_mode=validate_scope(payload.get("scope_mode") or "partial"),
+            session_id=payload.get("session_id") or None,
+            allow_unfinalized=bool(payload.get("allow_unfinalized")),
+        )
+        return ok(with_document_refs(packet["book"]["id"], packet))
+
     @app.post("/api/embed")
     def api_embed():
         payload = request_json()
