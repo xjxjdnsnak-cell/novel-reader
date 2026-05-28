@@ -26,9 +26,20 @@ def test_web_console_has_workflow_layout_and_predict_panel():
         'id="documentsPanel"',
         'id="predictCard"',
         'id="predictBtn"',
+        'id="continueCard"',
         'id="reportScope"',
         'id="l1Progress"',
         'id="fullScopeState"',
+        'id="activeArtifactPanel"',
+        'id="artifactActionBar"',
+        'id="sendArtifactBtn"',
+        'id="openArtifactDocBtn"',
+        'id="copyArtifactSummaryBtn"',
+        'id="claudeChatPanel"',
+        'id="chatMessages"',
+        'id="chatAttachment"',
+        'id="documentSendClaudeBtn"',
+        'id="documentCategoryFilter"',
         'id="autoSurveyBtn"',
         'id="autoReadingDepth"',
         'id="claudeCacheStatus"',
@@ -44,6 +55,10 @@ def test_web_console_has_workflow_layout_and_predict_panel():
     assert "Claude 自动阅读（实验性）" in visible
     assert "阶段性范围" in visible
     assert "全书范围" in visible
+    assert "当前产物" in visible
+    assert "发送给 Claude" in visible
+    assert "Claude 对话" in visible
+    assert "发送文档给 Claude" in visible
 
 
 def test_web_console_js_has_task_state_and_renderers():
@@ -62,6 +77,14 @@ def test_web_console_js_has_task_state_and_renderers():
         "renderPredictionPacket",
         "renderError",
         "runPredict",
+        "setActiveArtifact",
+        "sendArtifactToClaude",
+        "renderChatMessages",
+        "renderDocumentGroups",
+        "renderArtifactActions",
+        "setChatContext",
+        "sendClaudeMessage",
+        "sendDocumentToClaude",
         "autoSurveyState",
         "startAutoReading",
         "startAutoSurveyReading",
@@ -80,10 +103,11 @@ def test_web_console_js_has_task_state_and_renderers():
     ):
         assert symbol in js
 
-    assert "\\u5168\\u4e66\\u62a5\\u544a" in js
-    assert "\\u7f6e\\u4fe1\\u5ea6" in js
-    assert "\\u6700\\u8fd1\\u4efb\\u52a1" in js
-    assert 'scope:$("reportScope")?.value||"partial"' in js.replace(" ", "")
+    assert "Full Scope" in js
+    assert "置信度" in js
+    assert "最近任务" in js
+    assert 'scope: $("reportScope").value' in js
+    assert 'context: context || {' in js
 
 
 def test_web_console_static_text_has_no_broken_question_mark_or_mojibake_labels():
@@ -124,6 +148,12 @@ def test_web_console_css_has_progress_task_and_error_styles():
         ".warning-card",
         ".prediction-card",
         ".json-details",
+        ".active-artifact",
+        ".artifact-actions",
+        ".claude-chat",
+        ".chat-messages",
+        ".chat-attachment",
+        ".chat-message",
         ".auto-survey-controls",
         ".auto-survey-state",
         ".cache-meter",
