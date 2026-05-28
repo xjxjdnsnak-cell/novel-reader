@@ -778,3 +778,52 @@ blockquote {
     max-height: none;
   }
 }
+
+.task-history {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+}
+
+.task-history h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.task-history-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  font-size: 12px;
+}
+
+.task-history-item span {
+  font-weight: 700;
+}
+
+.task-history-item.success span {
+  color: var(--ok);
+}
+
+.task-history-item.error span {
+  color: var(--bad);
+}
+
+.task-history-item em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.meta-inline {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
