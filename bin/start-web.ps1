@@ -14,6 +14,22 @@ param(
 
     [int]$BatchSize = 4,
 
+    [double]$CudaMemoryFraction = 0.85,
+
+    [int]$MaxSeqLength = 1024,
+
+    [ValidateSet("auto", "sentence-transformers", "llama-cpp")]
+    [string]$Backend = "auto",
+
+    [ValidateSet("auto", "cpu", "cuda")]
+    [string]$Device = "auto",
+
+    [int]$GpuLayers = 99,
+
+    [int]$ContextSize = 2048,
+
+    [int]$LlamaBatchSize = 512,
+
     [switch]$EnableClaudeChat,
 
     [ValidateSet("once", "continue", "both")]
@@ -33,6 +49,11 @@ $SrcPath = Join-Path $PluginRoot "src"
 $LocalDir = Join-Path $PluginRoot ".novel-reader-local"
 $ConfigPath = Join-Path $LocalDir "config.json"
 $ModelName = "qwen3-embedding-0.6b"
+$EffectiveEmbeddingPort = $EmbeddingPort
+
+if (-not $env:NOVEL_READER_HOME) {
+    $env:NOVEL_READER_HOME = Join-Path $PluginRoot ".novel-reader"
+}
 
 function Read-LocalConfig {
     $config = @{}
@@ -53,6 +74,12 @@ function Test-EmbeddingService([int]$ServicePort) {
     $baseUrl = "http://127.0.0.1:$ServicePort"
     try {
         $health = Invoke-RestMethod -Uri "$baseUrl/health" -Method Get -TimeoutSec 2
+        if ($health.model) {
+            $script:ModelName = [string]$health.model
+        }
+        if ($health.model_path) {
+            $script:DetectedEmbeddingModelPath = [string]$health.model_path
+        }
         return [bool]$health.ok
     } catch {
         try {
@@ -62,6 +89,37 @@ function Test-EmbeddingService([int]$ServicePort) {
         } catch {
             return $false
         }
+    }
+}
+
+function Stop-EmbeddingServiceOnPort([int]$ServicePort) {
+    try {
+        $health = $null
+        try {
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ServicePort/health" -Method Get -TimeoutSec 2
+        } catch {
+            $health = $null
+        }
+        $looksLikeEmbedding = $false
+        if ($health) {
+            $looksLikeEmbedding = [bool]($health.PSObject.Properties.Name -contains "model" -or
+                $health.PSObject.Properties.Name -contains "model_path" -or
+                $health.PSObject.Properties.Name -contains "model_loaded")
+        }
+        if (-not $looksLikeEmbedding) {
+            Write-Warning "Port $ServicePort is occupied, but it does not look like this Qwen/Novel Reader embedding service. Not stopping it automatically. Use another port or close that program manually."
+            return $false
+        }
+        $connections = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $ServicePort -State Listen -ErrorAction Stop
+        foreach ($connection in $connections) {
+            Write-Host "Stopping existing embedding service on port $ServicePort (pid $($connection.OwningProcess)) ..."
+            Stop-Process -Id $connection.OwningProcess -Force -ErrorAction Stop
+        }
+        Start-Sleep -Seconds 2
+        return $true
+    } catch {
+        Write-Warning "Could not stop the existing process on port $ServicePort. Close it manually, then run the launcher again."
+        return $false
     }
 }
 
@@ -102,6 +160,80 @@ function Resolve-WebPort([int]$PreferredPort) {
         }
     }
     throw "Could not find a free local port near $PreferredPort."
+}
+
+function Start-BackgroundPythonProcess([string[]]$Arguments, [string]$WorkingDirectory, [string]$StdoutPath, [string]$StderrPath) {
+    if ($env:PYTHONPATH) {
+        $env:PYTHONPATH = "$SrcPath;$env:PYTHONPATH"
+    } else {
+        $env:PYTHONPATH = $SrcPath
+    }
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        throw "Python was not found on PATH."
+    }
+
+    $quote = {
+        param([string]$Value)
+        '"' + ($Value -replace '"', '\"') + '"'
+    }
+    $pythonCommand = @(& $quote $python.Source)
+    foreach ($arg in $Arguments) {
+        $pythonCommand += (& $quote $arg)
+    }
+    $commandLine = ($pythonCommand -join " ") + " 1> " + (& $quote $StdoutPath) + " 2> " + (& $quote $StderrPath)
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $env:ComSpec
+    if (-not $psi.FileName) {
+        $psi.FileName = "cmd.exe"
+    }
+    $psi.Arguments = '/d /s /c "' + $commandLine + '"'
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $processEnv = $psi.Environment
+    if ($null -eq $processEnv) {
+        $processEnv = $psi.EnvironmentVariables
+    }
+    $pathValue = $env:Path
+    [void]$processEnv.Remove("PATH")
+    [void]$processEnv.Remove("Path")
+    if ($pathValue) {
+        $processEnv["Path"] = $pathValue
+    }
+    $processEnv["PYTHONPATH"] = $env:PYTHONPATH
+    foreach ($name in @(
+        "NOVEL_READER_HOME",
+        "NOVEL_READER_EMBED_BASE_URL",
+        "NOVEL_READER_EMBED_API_KEY",
+        "NOVEL_READER_EMBED_MODEL",
+        "NOVEL_READER_CLAUDE_ENABLED",
+        "NOVEL_READER_CLAUDE_MODE",
+        "NOVEL_READER_CLAUDE_PERMISSION",
+        "QWEN_EMBED_MODEL_PATH",
+        "QWEN_EMBED_BATCH",
+        "QWEN_EMBED_HOST",
+        "QWEN_EMBED_PORT",
+        "QWEN_EMBED_MODEL_NAME",
+        "QWEN_EMBED_CUDA_MEMORY_FRACTION",
+        "QWEN_EMBED_MAX_SEQ_LENGTH",
+        "QWEN_EMBED_DEVICE",
+        "QWEN_EMBED_BACKEND",
+        "QWEN_EMBED_N_GPU_LAYERS",
+        "QWEN_EMBED_N_CTX",
+        "QWEN_EMBED_N_BATCH"
+    )) {
+        $value = [Environment]::GetEnvironmentVariable($name, "Process")
+        if ($value) {
+            $processEnv[$name] = $value
+        } else {
+            [void]$processEnv.Remove($name)
+        }
+    }
+
+    return [System.Diagnostics.Process]::Start($psi)
 }
 
 function Enable-EmbeddingEnv([int]$ServicePort) {
@@ -147,18 +279,85 @@ function Resolve-QwenModelPath([hashtable]$Config) {
     if ($env:QWEN_EMBED_MODEL_PATH) { $candidates += $env:QWEN_EMBED_MODEL_PATH }
     if ($Config.ContainsKey("modelPath")) { $candidates += [string]$Config["modelPath"] }
     $candidates += (Join-Path $HOME ".cache\modelscope\hub\models\Qwen\Qwen3-Embedding-0.6B")
+    $candidates += (Join-Path $HOME ".cache\modelscope\hub\models\Qwen\Qwen3-Embedding-4B-GGUF\Qwen3-Embedding-4B-Q4_K_M.gguf")
+    $candidates += (Join-Path $HOME ".cache\modelscope\hub\models\Qwen\Qwen3-Embedding-4B-GGUF")
+    $candidates += (Join-Path $HOME ".cache\modelscope\hub\models\Qwen\Qwen3-Embedding-4B")
 
     foreach ($candidate in $candidates) {
-        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-            return (Resolve-Path -LiteralPath $candidate).Path
+        if (-not $candidate -or -not (Test-Path -LiteralPath $candidate)) {
+            continue
         }
+        $resolved = (Resolve-Path -LiteralPath $candidate).Path
+        if ($Backend -eq "sentence-transformers" -and $resolved.ToLowerInvariant().EndsWith(".gguf")) {
+            continue
+        }
+        if ((Get-Item -LiteralPath $resolved).PSIsContainer) {
+            if ($Backend -eq "sentence-transformers") {
+                return $resolved
+            }
+            $preferred = Get-ChildItem -LiteralPath $resolved -Filter "*Q4_K_M*.gguf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $preferred) {
+                $preferred = Get-ChildItem -LiteralPath $resolved -Filter "*.gguf" -File -ErrorAction SilentlyContinue | Sort-Object Length | Select-Object -First 1
+            }
+            if ($preferred) {
+                return $preferred.FullName
+            }
+            continue
+        }
+        return $resolved
     }
     return $null
 }
 
+function Resolve-QwenModelName([string]$ResolvedModelPath) {
+    $leaf = Split-Path -Leaf $ResolvedModelPath
+    if ($leaf -match "4B") {
+        return "qwen3-embedding-4b"
+    }
+    if ($leaf -match "0\.6B") {
+        return "qwen3-embedding-0.6b"
+    }
+    if ($env:QWEN_EMBED_MODEL_NAME) {
+        return $env:QWEN_EMBED_MODEL_NAME
+    }
+    return $ModelName
+}
+
+function Resolve-QwenBackend([string]$ResolvedModelPath) {
+    if ($Backend -ne "auto") {
+        return $Backend
+    }
+    if ($ResolvedModelPath.ToLowerInvariant().EndsWith(".gguf")) {
+        return "llama-cpp"
+    }
+    return "sentence-transformers"
+}
+
 function Start-QwenEmbeddingService([string]$ResolvedModelPath, [int]$ServicePort, [int]$ServiceBatchSize) {
-    if (Test-EmbeddingService $ServicePort) {
-        return $true
+    $script:DetectedEmbeddingModelPath = $null
+    $serviceHealthy = Test-EmbeddingService $ServicePort
+    $desiredPath = (Resolve-Path -LiteralPath $ResolvedModelPath).Path
+    if ($script:DetectedEmbeddingModelPath) {
+        if ($script:DetectedEmbeddingModelPath -and $script:DetectedEmbeddingModelPath -ne $desiredPath) {
+            Write-Host "Embedding service on port $ServicePort is using a different model:"
+            Write-Host "  current: $script:DetectedEmbeddingModelPath"
+            Write-Host "  desired: $desiredPath"
+            if (-not (Stop-EmbeddingServiceOnPort $ServicePort)) {
+                $ServicePort = Resolve-WebPort ($ServicePort + 1)
+                $script:EffectiveEmbeddingPort = $ServicePort
+                Write-Host "Starting desired embedding model on alternate port $ServicePort."
+            }
+        } elseif ($serviceHealthy) {
+            $script:EffectiveEmbeddingPort = $ServicePort
+            return $true
+        } else {
+            Write-Host "Embedding service on port $ServicePort is unhealthy. Restarting it."
+            if (-not (Stop-EmbeddingServiceOnPort $ServicePort)) {
+                $ServicePort = Resolve-WebPort ($ServicePort + 1)
+                $script:EffectiveEmbeddingPort = $ServicePort
+                Write-Host "Starting desired embedding model on alternate port $ServicePort."
+            }
+        }
     }
 
     $python = Get-Command python -ErrorAction SilentlyContinue
@@ -183,20 +382,39 @@ function Start-QwenEmbeddingService([string]$ResolvedModelPath, [int]$ServicePor
     $env:QWEN_EMBED_BATCH = [string]$ServiceBatchSize
     $env:QWEN_EMBED_HOST = "127.0.0.1"
     $env:QWEN_EMBED_PORT = [string]$ServicePort
+    $script:ModelName = Resolve-QwenModelName $ResolvedModelPath
     $env:QWEN_EMBED_MODEL_NAME = $ModelName
+    $env:QWEN_EMBED_BACKEND = Resolve-QwenBackend $ResolvedModelPath
+    $env:QWEN_EMBED_DEVICE = $Device
+    $env:QWEN_EMBED_N_GPU_LAYERS = [string]$GpuLayers
+    $env:QWEN_EMBED_N_CTX = [string]$ContextSize
+    $env:QWEN_EMBED_N_BATCH = [string]$LlamaBatchSize
+    if ($CudaMemoryFraction -gt 0) {
+        $env:QWEN_EMBED_CUDA_MEMORY_FRACTION = [string]$CudaMemoryFraction
+    } else {
+        Remove-Item Env:QWEN_EMBED_CUDA_MEMORY_FRACTION -ErrorAction SilentlyContinue
+    }
+    if ($MaxSeqLength -gt 0) {
+        $env:QWEN_EMBED_MAX_SEQ_LENGTH = [string]$MaxSeqLength
+    } else {
+        Remove-Item Env:QWEN_EMBED_MAX_SEQ_LENGTH -ErrorAction SilentlyContinue
+    }
 
     Write-Host "Starting Qwen embedding service on 127.0.0.1:$ServicePort ..."
-    $process = Start-Process -FilePath $python.Source `
-        -ArgumentList @($server) `
+    Write-Host "  selected model path: $ResolvedModelPath"
+    Write-Host "  selected backend: $env:QWEN_EMBED_BACKEND"
+    Write-Host "  selected device: $env:QWEN_EMBED_DEVICE"
+    Write-Host "  selected model name: $ModelName"
+    $process = Start-BackgroundPythonProcess `
+        -Arguments @($server) `
         -WorkingDirectory $PluginRoot `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr `
-        -PassThru
+        -StdoutPath $stdout `
+        -StderrPath $stderr
 
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Seconds 1
         if (Test-EmbeddingService $ServicePort) {
+            $script:EffectiveEmbeddingPort = $ServicePort
             return $true
         }
         if ($process.HasExited) {
@@ -218,19 +436,19 @@ if ($HostName -ne "127.0.0.1" -and $HostName -ne "localhost") {
 }
 
 if (-not $NoEmbedding) {
-    if (Test-EmbeddingService $EmbeddingPort) {
-        Enable-EmbeddingEnv $EmbeddingPort
-        Write-Host "Embedding service detected at http://127.0.0.1:$EmbeddingPort/v1"
+    $config = Read-LocalConfig
+    $resolvedModelPath = Resolve-QwenModelPath $config
+    $resolvedBatchSize = $BatchSize
+    if ($resolvedModelPath -and (Resolve-QwenModelName $resolvedModelPath) -eq "qwen3-embedding-4b" -and -not $PSBoundParameters.ContainsKey("BatchSize")) {
+        $resolvedBatchSize = 1
+    }
+    $EffectiveEmbeddingPort = $EmbeddingPort
+    if ($resolvedModelPath -and (Start-QwenEmbeddingService $resolvedModelPath $EmbeddingPort $resolvedBatchSize)) {
+        Enable-EmbeddingEnv $EffectiveEmbeddingPort
+        Write-Host "Embedding service is ready at http://127.0.0.1:$EffectiveEmbeddingPort/v1 using $ModelName"
     } else {
-        $config = Read-LocalConfig
-        $resolvedModelPath = Resolve-QwenModelPath $config
-        if ($resolvedModelPath -and (Start-QwenEmbeddingService $resolvedModelPath $EmbeddingPort $BatchSize)) {
-            Enable-EmbeddingEnv $EmbeddingPort
-            Write-Host "Embedding service is ready at http://127.0.0.1:$EmbeddingPort/v1"
-        } else {
-            Write-Host "Embedding service is not available. The web console will still work with keyword search."
-            Write-Host "Use -ModelPath to provide your local Qwen model path, or -NoEmbedding to skip this check."
-        }
+        Write-Host "Embedding service is not available. The web console will still work with keyword search."
+        Write-Host "Use -ModelPath to provide your local Qwen model path, or -NoEmbedding to skip this check."
     }
 } else {
     Remove-Item Env:NOVEL_READER_EMBED_BASE_URL -ErrorAction SilentlyContinue
@@ -265,31 +483,30 @@ if ($Background) {
     }
     $stdout = Join-Path $LocalDir "web-console-$ResolvedWebPort.out.log"
     $stderr = Join-Path $LocalDir "web-console-$ResolvedWebPort.err.log"
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $python) {
-        throw "Python was not found."
-    }
-
     Write-Host "Starting Novel Reader Web Console in background at $WebUrl"
-    $process = Start-Process -FilePath $python.Source `
-        -ArgumentList @("-m", "novel_reader.web_app", "--host", $HostName, "--port", [string]$ResolvedWebPort) `
+    $process = Start-BackgroundPythonProcess `
+        -Arguments @("-m", "novel_reader.web_app", "--host", $HostName, "--port", [string]$ResolvedWebPort) `
         -WorkingDirectory $PluginRoot `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr `
-        -PassThru
+        -StdoutPath $stdout `
+        -StderrPath $stderr
 
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-WebConsole $HostName $ResolvedWebPort) {
             if ($OpenBrowser) {
-                Start-Process $WebUrl
+                try {
+                    Start-Process $WebUrl
+                } catch {
+                    Write-Warning "Could not open browser automatically. Open this URL manually: $WebUrl"
+                }
             }
             Write-Host "Novel Reader Web Console is ready: $WebUrl"
-            Write-Host "Process id: $($process.Id)"
+            if ($process.PSObject.Properties.Name -contains "Id") {
+                Write-Host "Background id: $($process.Id)"
+            }
             return
         }
-        if ($process.HasExited) {
+        if (($process.PSObject.Properties.Name -contains "HasExited") -and $process.HasExited) {
             Write-Warning "Web console exited early. Check logs:"
             Write-Warning "  $stdout"
             Write-Warning "  $stderr"
@@ -304,7 +521,11 @@ if ($Background) {
 }
 
 if ($OpenBrowser) {
-    Start-Process $WebUrl
+    try {
+        Start-Process $WebUrl
+    } catch {
+        Write-Warning "Could not open browser automatically. Open this URL manually: $WebUrl"
+    }
 }
 
 Write-Host "Starting Novel Reader Web Console at $WebUrl"

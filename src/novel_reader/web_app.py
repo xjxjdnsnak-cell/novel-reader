@@ -24,6 +24,7 @@ DOCUMENT_DIRS = ("maps", "reports", "styles", "continuations", "predictions", "s
 DOCUMENT_EXTS = {".md", ".json", ".txt"}
 CLAUDE_TIMEOUT_SECONDS = 240
 MAX_CLAUDE_CONTEXT_CHARS = 80000
+MAX_CLAUDE_MESSAGE_CHARS = 20000
 
 
 def make_app() -> Flask:
@@ -568,6 +569,8 @@ def claude_mode_allowed(requested: str, configured: str) -> bool:
 
 
 def build_claude_prompt(message: str, book: Any, context: dict[str, Any]) -> str:
+    if len(message) > MAX_CLAUDE_MESSAGE_CHARS:
+        message = message[:MAX_CLAUDE_MESSAGE_CHARS] + "\n...[message truncated]"
     context_text = json.dumps(context, ensure_ascii=False, indent=2)
     if len(context_text) > MAX_CLAUDE_CONTEXT_CHARS:
         context_text = context_text[:MAX_CLAUDE_CONTEXT_CHARS] + "\n...[context truncated]"
@@ -598,10 +601,10 @@ def call_claude(prompt: str, mode: str, permission: str) -> dict[str, Any]:
     args.extend(["-p", "--output-format", "json"])
     if permission == "dangerous":
         args.append("--dangerously-skip-permissions")
-    args.append(prompt)
     completed = subprocess.run(
         args,
         cwd=Path.cwd(),
+        input=prompt,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -618,6 +621,7 @@ def call_claude(prompt: str, mode: str, permission: str) -> dict[str, Any]:
         parsed = None
     if completed.returncode != 0:
         raise cli.NovelReaderError(completed.stderr.strip() or completed.stdout.strip() or f"Claude exited with {completed.returncode}.")
+    usage = extract_claude_usage(parsed)
     return {
         "mode": mode,
         "permission": permission,
@@ -625,6 +629,9 @@ def call_claude(prompt: str, mode: str, permission: str) -> dict[str, Any]:
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "parsed": parsed,
+        "raw_parsed": parsed,
+        "usage": usage,
+        "cache": extract_claude_cache(usage),
     }
 
 
@@ -643,6 +650,49 @@ def extract_claude_reply(parsed: Any) -> str | None:
             if parts:
                 return "\n".join(parts).strip()
     return None
+
+
+def extract_claude_usage(parsed: Any) -> dict[str, Any]:
+    if not isinstance(parsed, dict):
+        return {}
+    usage = parsed.get("usage")
+    if isinstance(usage, dict):
+        return usage
+    message = parsed.get("message")
+    if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+        return message["usage"]
+    result = parsed.get("result")
+    if isinstance(result, dict) and isinstance(result.get("usage"), dict):
+        return result["usage"]
+    return {}
+
+
+def usage_int(usage: dict[str, Any], *names: str) -> int:
+    for name in names:
+        value = usage.get(name)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return 0
+
+
+def extract_claude_cache(usage: dict[str, Any]) -> dict[str, Any]:
+    if not usage:
+        return {
+            "available": False,
+            "read_input_tokens": 0,
+            "creation_input_tokens": 0,
+            "hit_rate": None,
+        }
+    read_tokens = usage_int(usage, "cache_read_input_tokens", "cache_read_tokens")
+    creation_tokens = usage_int(usage, "cache_creation_input_tokens", "cache_creation_tokens")
+    denominator = read_tokens + creation_tokens
+    hit_rate = round(read_tokens / denominator, 4) if denominator else None
+    return {
+        "available": bool(read_tokens or creation_tokens),
+        "read_input_tokens": read_tokens,
+        "creation_input_tokens": creation_tokens,
+        "hit_rate": hit_rate,
+    }
 
 
 def main() -> None:

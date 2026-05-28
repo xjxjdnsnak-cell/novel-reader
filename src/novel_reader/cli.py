@@ -1911,7 +1911,8 @@ def command_predict(args: argparse.Namespace) -> int:
             if args.json:
                 raise NovelReaderJsonError(payload)
             raise NovelReaderError(payload.get("error", {}).get("message") or payload.get("reason") or "Full-scope prediction is not allowed.")
-    packet = build_prediction_packet(root, args.book, args)
+    use_llm = bool(getattr(args, "llm", False))
+    packet = build_prediction_packet(root, args.book, args, use_llm=use_llm)
     if args.write:
         packet["output_paths"] = write_prediction_packet(root, args.book, packet)
     if args.json:
@@ -2380,6 +2381,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top", type=int, default=8)
     p.add_argument("--context-chunks", type=int, default=5)
     p.add_argument("--semantic", action="store_true")
+    p.add_argument("--llm", action="store_true", help="使用 LLM (claude CLI) 生成深度预测，而非模板填充。")
     p.add_argument("--write", action="store_true")
     p.add_argument("--json", action="store_true")
     p.add_argument("--scope-mode", choices=("partial", "full"), default="partial")

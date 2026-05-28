@@ -91,4 +91,6 @@ For plot Q&A and analysis, include direct answer, evidence list, uncertainty not
 
 For prediction, output a prediction package or summary with probabilities, source evidence, risk, watchlist, and a disclaimer that this is not author-confirmed future content.
 
+`predict` is local/template based by default. Only use `predict --llm` when the user explicitly wants Claude-assisted prediction; it calls the local `claude` CLI and still must not generate prose continuation or claim to know the author's real future plot.
+
 For continuation, read the package constraints and self-checklist before writing original prose, then include a self-checklist after the prose.

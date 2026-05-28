@@ -3,259 +3,337 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Novel Reader Console</title>
+    <title>Novel Reader 本地控制台</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
+      <header class="app-header">
         <div class="brand">
           <div class="brand-mark">NR</div>
           <div>
-            <h1>Novel Reader</h1>
-            <p>本地小说操作台</p>
+            <h1>小说阅读器</h1>
+            <p>本地长篇小说工作台</p>
           </div>
         </div>
+        <div class="top-status">
+          <span id="selectedBookPill" class="badge neutral">未选择书籍</span>
+          <span id="embeddingPill" class="badge neutral">语义索引未检查</span>
+          <span id="claudePill" class="badge neutral">Claude 未检查</span>
+        </div>
+      </header>
 
-        <section class="panel compact">
-          <div class="panel-head">
-            <h2>书库</h2>
-            <button id="refreshBooks" class="icon-button" title="刷新">↻</button>
-          </div>
-          <div id="bookList" class="book-list"></div>
-        </section>
-
-        <section class="panel compact">
-          <h2>导入</h2>
-          <label>TXT/Markdown 路径</label>
-          <input id="ingestPath" type="text" placeholder="C:\path\book.txt" />
-          <div class="inline-grid">
-            <input id="ingestId" type="text" placeholder="book_id 可选" />
-            <label class="check-line"><input id="ingestForce" type="checkbox" /> 重建</label>
-          </div>
-          <button id="ingestBtn" class="primary">导入小说</button>
-        </section>
-      </aside>
-
-      <main class="workspace">
-        <header class="topbar">
-          <div>
-            <div class="eyebrow">当前书籍</div>
-            <h2 id="currentTitle">未选择</h2>
-          </div>
-          <div class="status-pills">
-            <span id="embeddingPill" class="pill neutral">Embedding 未检查</span>
-            <span id="claudePill" class="pill neutral">Claude 未检查</span>
-            <span id="coveragePill" class="pill neutral">覆盖率 --</span>
-          </div>
-        </header>
-
-        <nav class="tabs" aria-label="功能区">
-          <button class="tab active" data-tab="read">阅读</button>
-          <button class="tab" data-tab="search">检索问答</button>
-          <button class="tab" data-tab="reports">分析地图</button>
-          <button class="tab" data-tab="documents">文档</button>
-          <button class="tab" data-tab="style">风格</button>
-          <button class="tab" data-tab="continue">续写</button>
-          <button class="tab" data-tab="claude">Claude</button>
-          <button class="tab" data-tab="embedding">Embedding</button>
-        </nav>
-
-        <section id="tab-read" class="tab-panel active">
-          <div class="tool-grid two">
-            <section class="panel">
-              <h2>章节阅读</h2>
-              <div class="form-row">
-                <label>章节</label>
-                <input id="readChapter" type="number" min="1" value="1" />
-                <button id="readBtn" class="primary">读取</button>
+      <main class="console-grid">
+        <aside id="libraryPanel" class="column left-column">
+          <section class="panel sticky-panel">
+            <div class="panel-head">
+              <div>
+                <h2>书库与进度</h2>
+                <p>选择书籍并查看阅读状态</p>
               </div>
-              <div class="form-row">
-                <label>Chunk</label>
-                <input id="readChunk" type="text" placeholder="c0012-003" />
-                <button id="readChunkBtn">读取块</button>
-              </div>
-            </section>
-            <section class="panel">
-              <h2>状态</h2>
-              <button id="statusBtn">刷新状态</button>
-              <pre id="statusBox" class="code-box compact-code"></pre>
-            </section>
-          </div>
-          <div id="readOutput" class="result-stack"></div>
-        </section>
-
-        <section id="tab-search" class="tab-panel">
-          <div class="tool-grid two">
-            <section class="panel">
-              <h2>检索</h2>
-              <textarea id="searchQuery" rows="3" placeholder="输入关键词或语义问题"></textarea>
-              <div class="form-row">
-                <label class="check-line"><input id="searchSemantic" type="checkbox" /> 语义</label>
-                <input id="searchTop" type="number" min="1" max="30" value="8" />
-                <button id="searchBtn" class="primary">搜索</button>
-              </div>
-            </section>
-            <section class="panel">
-              <h2>问答证据包</h2>
-              <textarea id="askQuestion" rows="3" placeholder="例如：这个伏笔在哪里回收？"></textarea>
-              <div class="form-row">
-                <label class="check-line"><input id="askSemantic" type="checkbox" /> 语义</label>
-                <button id="askBtn" class="primary">生成证据包</button>
-              </div>
-            </section>
-          </div>
-          <div id="searchOutput" class="result-stack"></div>
-        </section>
-
-        <section id="tab-reports" class="tab-panel">
-          <section class="panel">
-            <h2>分析与地图</h2>
-            <div class="button-row">
-              <button data-action="outline">生成情节梳理</button>
-              <button data-action="map">生成全书地图</button>
-              <button data-action="analyze">生成写作分析</button>
+              <button id="refreshBooks" class="small-button">刷新</button>
             </div>
-          </section>
-          <div id="reportsOutput" class="result-stack"></div>
-        </section>
 
-        <section id="tab-documents" class="tab-panel">
-          <div class="document-layout">
-            <section class="panel document-sidebar">
-              <div class="panel-head">
-                <h2>文档</h2>
-                <button id="refreshDocs">刷新</button>
-              </div>
-              <div id="documentList" class="document-list"></div>
-            </section>
-            <section class="panel document-viewer">
-              <div class="panel-head">
-                <div>
-                  <h2 id="documentTitle">未选择文档</h2>
-                  <div id="documentMeta" class="result-meta"></div>
-                </div>
-                <div class="button-row tight">
-                  <button id="docPreviewBtn">预览</button>
-                  <button id="docSourceBtn">源码</button>
-                  <a id="docDownload" class="button-link" href="#" hidden>下载</a>
-                </div>
-              </div>
-              <div id="documentOutput" class="document-output"></div>
-            </section>
-          </div>
-        </section>
+            <div id="bookList" class="book-list"></div>
 
-        <section id="tab-style" class="tab-panel">
-          <section class="panel">
-            <h2>语言风格蒸馏</h2>
-            <div class="form-row">
-              <label>场景</label>
-              <select id="styleScene">
-                <option value="">全书</option>
-                <option>战斗</option>
-                <option>悬疑</option>
-                <option>感情</option>
-                <option>日常</option>
-                <option>说明</option>
+            <div class="divider"></div>
+            <h3 id="currentTitle">未选择书籍</h3>
+            <div id="bookMeta" class="meta-block">导入一本 TXT/Markdown 后开始。</div>
+
+            <section id="readingProgressPanel" class="progress-panel">
+              <div class="section-title">精读进度</div>
+              <div id="sessionMeta" class="meta-block">未创建阅读会话</div>
+              <div class="progress-row">
+                <span>L1 快速覆盖</span>
+                <strong id="l1ProgressText">0%</strong>
+              </div>
+              <div class="progress-track"><div id="l1Progress" class="progress-fill l1" style="width:0%"></div></div>
+              <div class="progress-row">
+                <span>L2 标准阅读</span>
+                <strong id="l2ProgressText">0%</strong>
+              </div>
+              <div class="progress-track"><div id="l2Progress" class="progress-fill l2" style="width:0%"></div></div>
+              <div class="progress-row">
+                <span>L3 深度精读</span>
+                <strong id="l3ProgressText">0%</strong>
+              </div>
+              <div class="progress-track"><div id="l3Progress" class="progress-fill l3" style="width:0%"></div></div>
+              <div id="fullScopeState" class="scope-state locked">全书报告：锁定</div>
+            </section>
+
+            <div class="button-grid">
+              <button id="createSurveyBtn">创建快速覆盖</button>
+              <button id="createBalancedBtn">创建均衡阅读</button>
+              <button id="createDeepBtn">创建深度阅读</button>
+              <button id="readNextBtn">读取下一章</button>
+              <button id="finalizeBtn">完成阅读</button>
+            </div>
+
+            <section class="auto-survey-box">
+              <div class="section-title">Claude 自动阅读</div>
+              <div id="autoSurveyState" class="auto-survey-state">未启动</div>
+              <label>阅读深度</label>
+              <select id="autoReadingDepth">
+                <option value="auto">按 session 要求自动</option>
+                <option value="L1_SKIMMED">只跑 L1</option>
+                <option value="L2_READ">跑到 L2</option>
+                <option value="L3_DEEP_READ">跑到 L3</option>
               </select>
-              <label class="check-line"><input id="styleWrite" type="checkbox" /> 写入文档</label>
-              <button id="styleBtn" class="primary">生成风格证据</button>
+              <div id="claudeCacheStatus" class="cache-meter">Claude 缓存：尚未调用</div>
+              <div class="auto-survey-controls">
+                <button id="autoSurveyBtn" class="primary">自动阅读</button>
+                <button id="pauseAutoSurveyBtn">暂停</button>
+                <button id="resumeAutoSurveyBtn">继续</button>
+              </div>
+            </section>
+
+            <details class="note-editor">
+              <summary>提交章节笔记</summary>
+              <label>章节</label>
+              <input id="noteChapter" type="number" min="1" value="1" />
+              <label>笔记文本</label>
+              <textarea id="noteText" rows="6" placeholder="粘贴 L1/L2/L3 结构化摘要，需包含证据 chunk_id"></textarea>
+              <button id="submitNoteBtn" class="primary">提交笔记</button>
+            </details>
+          </section>
+        </aside>
+
+        <section class="column center-column">
+          <section class="panel import-panel">
+            <div class="panel-head">
+              <div>
+                <h2>导入</h2>
+                <p>输入本机 TXT/Markdown 路径</p>
+              </div>
+            </div>
+            <div class="inline-form">
+              <input id="ingestPath" type="text" placeholder="C:\path\book.txt" />
+              <input id="ingestId" type="text" placeholder="book_id 可选" />
+              <label class="check-line"><input id="ingestForce" type="checkbox" /> 重建</label>
+              <button id="ingestBtn" class="primary">导入</button>
             </div>
           </section>
-          <div id="styleOutput" class="result-stack"></div>
-        </section>
 
-        <section id="tab-continue" class="tab-panel">
+          <section class="panel" id="quickActionsPanel">
+            <div class="panel-head">
+              <div>
+                <h2>常用操作</h2>
+                <p>常用工作流入口</p>
+              </div>
+              <button id="healthBtn" class="small-button">检查服务</button>
+            </div>
+
+            <div class="workflow-grid">
+              <article class="workflow-card">
+                <h3>读取章节</h3>
+                <div class="inline-form compact">
+                  <input id="readChapter" type="number" min="1" value="1" />
+                  <input id="readChunk" type="text" placeholder="文本块 ID，可选" />
+                  <button id="readBtn">读取</button>
+                </div>
+              </article>
+
+              <article class="workflow-card">
+                <h3>搜索 / 问答</h3>
+                <textarea id="searchQuery" rows="3" placeholder="关键词、问题或剧情线索"></textarea>
+                <div class="inline-form compact">
+                  <label class="check-line"><input id="searchSemantic" type="checkbox" /> 语义检索</label>
+                  <input id="searchTop" type="number" min="1" max="30" value="8" />
+                  <button id="searchBtn">搜索</button>
+                  <button id="askBtn">问答证据包</button>
+                </div>
+              </article>
+
+              <article class="workflow-card">
+                <h3>分析 / 地图</h3>
+                <div class="button-row">
+                  <button data-action="outline">生成大纲</button>
+                  <button data-action="map">生成地图</button>
+                  <button data-action="analyze">写作分析</button>
+                </div>
+              </article>
+
+              <article class="workflow-card">
+                <h3>风格分析</h3>
+                <div class="inline-form compact">
+                  <select id="styleScene">
+                    <option value="">全书</option>
+                    <option>战斗</option>
+                    <option>悬疑</option>
+                    <option>感情</option>
+                    <option>日常</option>
+                    <option>说明</option>
+                  </select>
+                  <label class="check-line"><input id="styleWrite" type="checkbox" /> 写入</label>
+                  <button id="styleBtn">生成</button>
+                </div>
+              </article>
+
+              <article id="predictCard" class="workflow-card wide">
+                <div class="panel-head">
+                  <div>
+                    <h3>预测后续剧情</h3>
+                    <p>输出概率化预测，不生成正文</p>
+                  </div>
+                  <span class="badge info">预测</span>
+                </div>
+                <textarea id="predictQuestion" rows="3" placeholder="这本未完结小说后面可能怎么发展？"></textarea>
+                <div class="form-grid">
+                  <label>预测范围
+                    <select id="predictScope">
+                      <option value="general">综合走向</option>
+                      <option value="next-arc">下一剧情段</option>
+                      <option value="character">人物走向</option>
+                      <option value="foreshadowing">伏笔回收</option>
+                      <option value="ending">结局可能</option>
+                    </select>
+                  </label>
+                  <label>预测跨度
+                    <select id="predictHorizon">
+                      <option value="next-3-chapters">接下来 3 章</option>
+                      <option value="next-arc" selected>下一剧情段</option>
+                      <option value="ending">结局方向</option>
+                    </select>
+                  </label>
+                  <label>锚点章节
+                    <input id="predictAnchorChapter" type="number" min="1" />
+                  </label>
+                  <label>锚点文本块
+                    <input id="predictAnchorChunk" type="text" placeholder="c0080-001" />
+                  </label>
+                </div>
+                <details class="advanced-options">
+                  <summary>高级选项</summary>
+                  <div class="inline-form compact">
+                    <label class="check-line"><input id="predictSemantic" type="checkbox" /> 语义检索</label>
+                    <label class="check-line"><input id="predictWrite" type="checkbox" /> 写入文档</label>
+                    <select id="predictScopeMode">
+                      <option value="partial">阶段性范围</option>
+                      <option value="full">全书范围</option>
+                    </select>
+                    <input id="predictSessionId" type="text" placeholder="阅读会话 ID 自动填充，可覆盖" />
+                    <label class="check-line"><input id="predictAllowUnfinalized" type="checkbox" /> 允许未完成阅读</label>
+                  </div>
+                </details>
+                <button id="predictBtn" class="primary">生成预测包</button>
+              </article>
+
+              <article class="workflow-card wide">
+                <h3>续写任务包</h3>
+                <div class="form-grid">
+                  <label>接在第几章后<input id="contChapter" type="number" min="1" /></label>
+                  <label>接在哪个文本块后<input id="contChunk" type="text" placeholder="c0012-003" /></label>
+                  <label>篇幅
+                    <select id="contLength">
+                      <option value="short">短</option>
+                      <option value="medium" selected>中</option>
+                      <option value="long">长</option>
+                    </select>
+                  </label>
+                  <label>场景
+                    <select id="contScene">
+                      <option value="">未指定</option>
+                      <option>战斗</option>
+                      <option>悬疑</option>
+                      <option>感情</option>
+                      <option>日常</option>
+                      <option>说明</option>
+                    </select>
+                  </label>
+                </div>
+                <textarea id="contOutline" rows="3" placeholder="可选：续写方向或大纲"></textarea>
+                <div class="inline-form compact">
+                  <label class="check-line"><input id="contSemantic" type="checkbox" /> 语义检索</label>
+                  <label class="check-line"><input id="contWrite" type="checkbox" /> 写入</label>
+                  <button id="continueBtn">生成任务包</button>
+                </div>
+              </article>
+
+              <article class="workflow-card">
+                <h3>构建语义索引</h3>
+                <p class="meta-block">复用当前语义模型服务；后端未提供真实文本块进度时显示等待状态。</p>
+                <div class="inline-form compact">
+                  <input id="embedBatch" type="number" min="1" value="4" />
+                  <input id="embedMaxChars" type="number" min="200" value="1500" />
+                  <button id="embedBtn">构建索引</button>
+                </div>
+              </article>
+
+              <article class="workflow-card">
+                <h3>Claude</h3>
+                <textarea id="claudeMessage" rows="3" placeholder="把当前结果或文档交给 Claude"></textarea>
+                <div class="inline-form compact">
+                  <select id="claudeMode">
+                    <option value="once">单次对话</option>
+                    <option value="continue">连续会话</option>
+                  </select>
+                  <button id="sendClaudeBtn">发送</button>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section id="activeTaskPanel" class="panel active-task">
+            <div class="panel-head">
+              <div>
+                <h2>当前任务</h2>
+                <p id="taskSubtitle">当前没有任务运行</p>
+              </div>
+              <span id="taskStatusBadge" class="badge neutral">空闲</span>
+            </div>
+            <div class="task-progress">
+              <div class="progress-row">
+                <span id="taskProgressLabel">等待操作</span>
+                <strong id="taskElapsed">0s</strong>
+              </div>
+              <div class="progress-track"><div id="taskProgressFill" class="progress-fill task" style="width:0%"></div></div>
+            </div>
+            <div id="taskLog" class="task-log"></div>
+          </section>
+
           <section class="panel">
-            <h2>续写任务包</h2>
-            <div class="form-grid">
-              <label>从章节后<input id="contChapter" type="number" min="1" placeholder="12" /></label>
-              <label>或从 Chunk 后<input id="contChunk" type="text" placeholder="c0012-003" /></label>
-              <label>长度
-                <select id="contLength">
-                  <option value="short">short</option>
-                  <option value="medium" selected>medium</option>
-                  <option value="long">long</option>
-                </select>
-              </label>
-              <label>场景
-                <select id="contScene">
-                  <option value="">未指定</option>
-                  <option>战斗</option>
-                  <option>悬疑</option>
-                  <option>感情</option>
-                  <option>日常</option>
-                  <option>说明</option>
-                </select>
-              </label>
+            <div class="panel-head">
+              <div>
+                <h2>结果预览</h2>
+                <p>结构化结果、证据和恢复动作</p>
+              </div>
             </div>
-            <label>续写大纲</label>
-            <textarea id="contOutline" rows="4" placeholder="写入你希望下一幕发生的事情"></textarea>
-            <div class="form-row">
-              <label class="check-line"><input id="contSemantic" type="checkbox" /> 语义证据</label>
-              <label class="check-line"><input id="contWrite" type="checkbox" /> 写入文件</label>
-              <button id="continueBtn" class="primary">生成任务包</button>
-            </div>
+            <div id="resultPreview" class="result-stack"></div>
           </section>
-          <div id="continueOutput" class="result-stack"></div>
         </section>
 
-        <section id="tab-claude" class="tab-panel">
-          <div class="claude-layout">
-            <section class="panel">
-              <div class="panel-head">
-                <h2>Claude</h2>
-                <button id="claudeStatusBtn">检查</button>
+        <aside id="documentsPanel" class="column right-column">
+          <section class="panel sticky-panel">
+            <div class="panel-head">
+              <div>
+                <h2>文档与证据</h2>
+                <p>生成文件和当前证据包</p>
               </div>
-              <pre id="claudeStatusBox" class="code-box compact-code"></pre>
-              <label>模式</label>
-              <select id="claudeMode">
-                <option value="once">独立调用</option>
-                <option value="continue">连续会话</option>
-              </select>
-              <div class="attach-list">
-                <label class="check-line"><input id="attachDocument" type="checkbox" checked /> 当前文档</label>
-                <label class="check-line"><input id="attachAsk" type="checkbox" /> 问答证据包</label>
-                <label class="check-line"><input id="attachStyle" type="checkbox" /> 风格证据包</label>
-                <label class="check-line"><input id="attachContinue" type="checkbox" /> 续写任务包</label>
-              </div>
-            </section>
-            <section class="panel chat-panel">
-              <div id="chatLog" class="chat-log"></div>
-              <textarea id="claudeMessage" rows="4" placeholder="把当前文档或证据包交给 Claude 处理"></textarea>
-              <div class="button-row">
-                <button id="sendClaudeBtn" class="primary">发送给 Claude</button>
-                <button id="clearChatBtn">清空</button>
-              </div>
-            </section>
-          </div>
-        </section>
+              <button id="refreshDocs" class="small-button">刷新</button>
+            </div>
+            <div id="recentDocumentHint" class="meta-block">暂无最近生成文档</div>
+            <div id="documentList" class="document-list"></div>
+          </section>
 
-        <section id="tab-embedding" class="tab-panel">
-          <div class="tool-grid two">
-            <section class="panel">
-              <h2>服务状态</h2>
-              <button id="healthBtn">检查服务</button>
-              <pre id="healthBox" class="code-box compact-code"></pre>
-            </section>
-            <section class="panel">
-              <h2>建立语义索引</h2>
-              <div class="form-row">
-                <label>Batch</label>
-                <input id="embedBatch" type="number" min="1" value="4" />
-                <label>Max chars</label>
-                <input id="embedMaxChars" type="number" min="200" value="1500" />
+          <section class="panel document-viewer">
+            <div class="panel-head">
+              <div>
+                <h2 id="documentTitle">未选择文档</h2>
+                <p id="documentMeta">生成文档后会自动打开</p>
               </div>
-              <button id="embedBtn" class="primary">开始 Embedding</button>
-            </section>
-          </div>
-          <div id="embeddingOutput" class="result-stack"></div>
-        </section>
+              <a id="docDownload" class="button-link" href="#" hidden>下载</a>
+            </div>
+            <div class="button-row tight">
+              <button id="docPreviewBtn">预览</button>
+              <button id="docSourceBtn">源码</button>
+            </div>
+            <div id="documentOutput" class="document-output"></div>
+          </section>
+        </aside>
       </main>
     </div>
 
     <div id="toast" class="toast" hidden></div>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260527-zh2"></script>
   </body>
 </html>

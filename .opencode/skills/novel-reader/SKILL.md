@@ -61,4 +61,4 @@ python ./bin/novel-reader write-next <book_id> --after-chapter 12 --outline "用
 
 ## Output Discipline
 
-For plot questions and analysis, answer with a direct answer, evidence list, uncertainty note, and next reads/searches when useful. For prediction, include probabilities, evidence, risk, watchlist, and a disclaimer. For continuation, read the package constraints and self-checklist before writing original prose.
+For plot questions and analysis, answer with a direct answer, evidence list, uncertainty note, and next reads/searches when useful. For prediction, include probabilities, evidence, risk, watchlist, and a disclaimer. `predict` is local/template based by default; only use `predict --llm` when the user explicitly wants Claude-assisted prediction, because it calls the local `claude` CLI. For continuation, read the package constraints and self-checklist before writing original prose.

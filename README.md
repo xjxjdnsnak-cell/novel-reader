@@ -143,6 +143,8 @@ continue <book> --after-chapter N     Build a continuation package
 embed <book>                          Optional semantic index
 ```
 
+`predict` is local and template/evidence based by default. `predict --llm` is an explicit optional enhancement that calls the local `claude` CLI through subprocess and asks it to turn the prediction prompt into structured JSON. It still outputs a prediction analysis package, not prose continuation, and it must not be treated as author-confirmed future content.
+
 ## Semantic Search
 
 Keyword search and SQLite FTS work locally by default.
@@ -187,6 +189,7 @@ TODO backend options:
 - Plot claims should cite source evidence.
 - Full-book conclusions require governed reading coverage when using `--scope full`.
 - Future-plot prediction uses `predict`; it is probabilistic analysis, not author truth and not prose continuation.
+- `predict --llm` may send the generated prediction prompt and evidence excerpts to the local Claude Code CLI. Do not use it when you want strictly local/offline heuristic prediction.
 - Continuation writing should start from `continue` or `write-next`; the CLI does not call an external writing model.
 - Style distillation outputs transferable original-writing guidance, not direct imitation prompts.
 - Do not commit `.novel-reader/`, `.novel-reader-local/`, model paths, API keys, or novel text.

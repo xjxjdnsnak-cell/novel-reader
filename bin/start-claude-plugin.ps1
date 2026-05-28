@@ -19,6 +19,7 @@ $PluginRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 $LocalDir = Join-Path $PluginRoot ".novel-reader-local"
 $ClaudeWorkspace = Join-Path $LocalDir "claude-workspace"
 $Launcher = Join-Path $ScriptDir "start-novel-reader.ps1"
+$NovelReaderHome = Join-Path $PluginRoot ".novel-reader"
 
 if (-not (Test-Path -LiteralPath $ClaudeWorkspace)) {
     New-Item -ItemType Directory -Path $ClaudeWorkspace | Out-Null
@@ -40,12 +41,14 @@ $ClaudeMdText = @(
     "",
     "Useful local paths:",
     "- Plugin root: $PluginRoot",
+    "- Novel Reader data store: $NovelReaderHome",
     "- Web launcher: $PluginRoot\bin\start-web.ps1",
     "- CLI wrapper: $PluginRoot\bin\novel-reader.ps1"
 ) -join [Environment]::NewLine
 $ClaudeMdText | Set-Content -LiteralPath $ClaudeMd -Encoding UTF8
 
 Set-Location $ClaudeWorkspace
+$env:NOVEL_READER_HOME = $NovelReaderHome
 
 $launcherParams = @{
     Client = "claude"

@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any
 
 
-PREDICTION_SCHEMA_VERSION = "1.0"
+PREDICTION_SCHEMA_VERSION = "1.1"
+
+# Maximum character budget allocated to prediction prompt building
+# so that the prompt stays within reasonable LLM context limits.
+MAX_PROMPT_EVIDENCE_CHARS = 60000
+# Timeout (seconds) for the subprocess-based LLM call.
+LLM_TIMEOUT_SECONDS = 240
 
 THREAD_TERMS = {
     "foreshadowing": ("伏笔", "线索", "秘密", "真相", "隐藏", "异常", "prophecy", "secret", "truth", "hidden", "mystery", "clue"),
@@ -278,6 +287,314 @@ def build_story_so_far(summaries: dict[int, str], evidence: list[dict[str, Any]]
     }
 
 
+SCOPE_PROMPT_GUIDANCE: dict[str, str] = {
+    "ending": (
+        "你正在做「结局预测」。请基于前文所有伏笔、判词、诗歌谶语、人物对话中的暗示，"
+        "预测全书的最终结局。至少覆盖以下方面：\n"
+        "1. 主要人物的最终命运（逐个分析，引用判词/曲文/诗句作为证据）\n"
+        "2. 核心冲突的最终解决方式\n"
+        "3. 主题（如'好'与'了'、盛筵必散）的最终体现\n"
+        "4. 关键伏笔的回收路径（指出哪些前文线索将如何应验）\n"
+        "5. 可能的最终画面/场景描述"
+    ),
+    "next-arc": (
+        "你正在做「下一阶段预测」。请基于当前剧情状态和未解决的冲突，"
+        "预测下一阶段（约 3-10 章）的剧情走向：\n"
+        "1. 当前冲突如何升级或转变\n"
+        "2. 人物关系会发生什么变化\n"
+        "3. 哪些隐藏信息可能被揭露\n"
+        "4. 短期障碍和转折点"
+    ),
+    "character": (
+        "你正在做「人物走向预测」。请基于前文的人物动机、性格刻画和伏笔，"
+        "预测关键人物的未来发展：\n"
+        "1. 每个人物的弧线方向（成长/堕落/牺牲/黑化/和解）\n"
+        "2. 人物关系的关键转折点\n"
+        "3. 隐藏动机或秘密身份的揭示"
+    ),
+    "foreshadowing": (
+        "你正在做「伏笔回收预测」。请基于前文所有已铺设的伏笔和线索，"
+        "预测它们的回收方式：\n"
+        "1. 哪些伏笔将在结局前回收\n"
+        "2. 每个伏笔最可能的回收路径\n"
+        "3. 哪些伏笔可能相互关联形成更大的揭示"
+    ),
+    "general": (
+        "你正在做「综合剧情预测」。请基于前文所有信息，"
+        "预测后续剧情的主要发展方向：\n"
+        "1. 主线冲突的走向\n"
+        "2. 重要人物的命运变化\n"
+        "3. 关键伏笔的回收\n"
+        "4. 可能的反转或意外发展"
+    ),
+}
+
+PREDICTION_OUTPUT_FORMAT = """请以 JSON 格式输出预测结果，结构如下：
+```json
+{
+  "predictions": [
+    {
+      "id": "P1",
+      "type": "ending|plot_direction|character_arc|foreshadowing_payoff|conflict",
+      "claim": "具体的、有证据支撑的预测声明（不要泛泛而谈，要涉及具体人物和情节）",
+      "probability": "high|medium|low",
+      "confidence": 0.0-1.0,
+      "reasoning": ["推理步骤1", "推理步骤2", "..."],
+      "supporting_evidence": ["chunk_id1", "chunk_id2", "..."],
+      "counter_evidence": ["可能反驳此预测的证据"],
+      "risk": "此预测的风险或不确定性"
+    }
+  ],
+  "alternative_scenarios": [
+    {"name": "场景名", "summary": "描述", "probability": "medium|low"}
+  ],
+  "watchlist": ["下一步应观察的关键信号"]
+}
+```
+
+要求：
+- 每个 prediction 必须引用具体的 chunk_id 作为证据
+- claim 必须具体，涉及书中实际人物和情节
+- reasoning 必须展示从证据到结论的推理链
+- 不要输出模板化的通用声明"""
+
+
+def build_prediction_prompt(
+    book: dict[str, Any],
+    question: str | None,
+    scope: str,
+    horizon: str,
+    summaries: dict[int, str],
+    evidence: list[dict[str, Any]],
+    global_threads: list[dict[str, Any]],
+    open_threads: list[dict[str, Any]],
+    recent_context: list[dict[str, Any]],
+    character_states: list[dict[str, Any]],
+    anchor_chapter: int | None,
+    latest_chapter: int,
+    coverage: float,
+) -> str:
+    """Build a detailed Chinese prompt for LLM-powered prediction.
+
+    The prompt assembles all available evidence — summaries, chunk excerpts,
+    narrative threads, character states, and recent context — into a
+    structured analysis request that an LLM can use to generate deep,
+    evidence-grounded predictions instead of template filler.
+    """
+    lines: list[str] = []
+
+    # ── header ──────────────────────────────────────────────
+    lines.append(f"# 小说预测分析请求")
+    lines.append(f"书籍：{book.get('title', '未知')} (book_id: {book.get('id', '未知')})")
+    lines.append(f"总章节数：{book.get('chapter_count', '未知')}")
+    lines.append(f"摘要覆盖率：{coverage}%")
+    if anchor_chapter:
+        lines.append(f"分析锚点：第 {anchor_chapter} 章（仅使用该章及之前的内容）")
+    lines.append(f"分析范围：{scope}")
+    lines.append(f"时间跨度：{horizon}")
+    if question:
+        lines.append(f"用户问题：{question}")
+    lines.append("")
+    lines.append(SCOPE_PROMPT_GUIDANCE.get(scope, SCOPE_PROMPT_GUIDANCE["general"]))
+    lines.append("")
+
+    # ── story state ─────────────────────────────────────────
+    lines.append("## 当前剧情状态")
+    lines.append(f"最新章节：第 {latest_chapter} 章")
+    if recent_context:
+        lines.append("### 近期章节上下文")
+        for item in recent_context[-5:]:
+            title = item.get("chapter_title", "")
+            excerpt = item.get("excerpt", "")
+            lines.append(f"- **{item.get('chunk_id', '')}** ({title})：{excerpt}")
+    lines.append("")
+
+    # ── evidence chunks ─────────────────────────────────────
+    lines.append("## 关键证据片段")
+    lines.append("（以下是从全书中按线索相关性筛选出的原文片段和章节摘要）")
+    evidence_budget = 0
+    for item in evidence:
+        title = item.get("chapter_title", "")
+        reason = item.get("reason", "")
+        excerpt = item.get("excerpt", "")
+        chunk_id = item.get("chunk_id", "")
+        entry = f"- **{chunk_id}** [{reason}] ({title})：{excerpt}"
+        evidence_budget += len(entry)
+        if evidence_budget > MAX_PROMPT_EVIDENCE_CHARS:
+            lines.append(f"... (evidence truncated at {MAX_PROMPT_EVIDENCE_CHARS} chars, {len(evidence)} total chunks)")
+            break
+        lines.append(entry)
+    lines.append("")
+
+    # ── chapter summaries ───────────────────────────────────
+    lines.append("## 章节摘要（L1 快速覆盖）")
+    lines.append("（以下是全书各章的 L1 快速摘要，按章节顺序排列）")
+    summary_chars = 0
+    summary_budget = MAX_PROMPT_EVIDENCE_CHARS // 2
+    for chapter in sorted(summaries):
+        text = summaries[chapter]
+        # Extract the one_sentence field preferentially, plus a compact view of the rest
+        compact = compact_excerpt(text, 300)
+        entry = f"- 第{chapter}章：{compact}"
+        summary_chars += len(entry)
+        if summary_chars > summary_budget:
+            lines.append(f"... (summaries truncated, {len(summaries)} total)")
+            break
+        lines.append(entry)
+    lines.append("")
+
+    # ── global threads ──────────────────────────────────────
+    lines.append("## 全局叙事线索（跨章节）")
+    for item in global_threads[:8]:
+        lines.append(f"- 第{item['chapter']}章 [{item['type']}]：{item['summary']}")
+    lines.append("")
+
+    # ── open threads ────────────────────────────────────────
+    lines.append("## 未解决的叙事线索")
+    for item in open_threads[:6]:
+        lines.append(f"- 第{item['chapter']}章 [{item['type']}]：{item['summary']}")
+    lines.append("")
+
+    # ── character states ────────────────────────────────────
+    if character_states:
+        lines.append("## 人物状态快照")
+        for item in character_states:
+            lines.append(f"- {item.get('source', '')} [{item.get('basis', '')}]：{item.get('state', '')}")
+        lines.append("")
+
+    # ── output format ───────────────────────────────────────
+    lines.append(PREDICTION_OUTPUT_FORMAT)
+
+    return "\n".join(lines)
+
+
+def call_claude_for_prediction(prompt: str) -> str | None:
+    """Call the ``claude`` CLI as a subprocess for LLM-powered prediction.
+
+    Uses the same subprocess pattern as the web console's Claude bridge
+    (web_app.py:594-631).  Returns the parsed text reply on success,
+    or ``None`` when the CLI is not available or the call fails.
+    """
+    executable = shutil.which("claude")
+    if not executable:
+        return None
+    try:
+        completed = subprocess.run(
+            [executable, "-p", "--output-format", "json"],
+            cwd=Path.cwd(),
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=LLM_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    stdout = completed.stdout.strip()
+    if not stdout:
+        return None
+
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        # Raw text reply — use as-is.
+        return stdout
+
+    # Extract the actual text from the Claude CLI JSON envelope.
+    for key in ("result", "response", "text", "message"):
+        if key in parsed and isinstance(parsed[key], str):
+            return str(parsed[key])
+    # Claude Messages API format: content is a list of blocks.
+    if isinstance(parsed.get("content"), list):
+        pieces = [block["text"] for block in parsed["content"] if isinstance(block, dict) and block.get("type") == "text" and "text" in block]
+        if pieces:
+            return "\n".join(pieces)
+    return stdout
+
+
+def parse_llm_predictions(
+    llm_text: str,
+    scope: str,
+    evidence: list[dict[str, Any]],
+    global_threads: list[dict[str, Any]],
+    recent: list[dict[str, Any]],
+    insufficient: bool,
+) -> list[dict[str, Any]]:
+    """Parse structured predictions from an LLM text response.
+
+    Attempts to extract a JSON block from the LLM output.  On success,
+    validates and normalises each prediction entry against the existing
+    packet schema.  Falls back to a single ``llm_raw`` prediction entry
+    when JSON parsing fails.
+    """
+    # Try to locate a JSON block in the response.
+    json_candidate = llm_text
+    json_match = re.search(r"\{[\s\S]*\"predictions\"[\s\S]*\}", llm_text)
+    if json_match:
+        json_candidate = json_match.group(0)
+    elif re.search(r"```json\s*([\s\S]*?)\s*```", llm_text):
+        json_candidate = re.search(r"```json\s*([\s\S]*?)\s*```", llm_text).group(1)
+
+    predictions: list[dict[str, Any]] = []
+
+    try:
+        parsed = json.loads(json_candidate)
+        if isinstance(parsed, dict) and "predictions" in parsed:
+            for index, item in enumerate(parsed["predictions"], start=1):
+                if not isinstance(item, dict):
+                    continue
+                predictions.append({
+                    "id": item.get("id", f"P{index}"),
+                    "type": item.get("type", "plot_direction"),
+                    "claim": str(item.get("claim", "")),
+                    "probability": item.get("probability", "medium"),
+                    "confidence": round(float(item.get("confidence", 0.5)), 2),
+                    "reasoning": item.get("reasoning", []) if isinstance(item.get("reasoning"), list) else [str(item.get("reasoning", ""))],
+                    "supporting_evidence": item.get("supporting_evidence", []) if isinstance(item.get("supporting_evidence"), list) else [],
+                    "counter_evidence": item.get("counter_evidence", []) if isinstance(item.get("counter_evidence"), list) else [],
+                    "risk": str(item.get("risk", "")),
+                    "source": "llm",
+                })
+    except (json.JSONDecodeError, TypeError):
+        # Fallback: store the raw LLM response as a prediction entry.
+        predictions.append({
+            "id": "P1",
+            "type": f"{scope}_llm_analysis",
+            "claim": llm_text[:500].replace("\n", " "),
+            "probability": "medium",
+            "confidence": 0.5,
+            "reasoning": ["LLM 输出未能解析为结构化 JSON，完整回复见 raw_llm_response 字段。"],
+            "supporting_evidence": [item["chunk_id"] for item in evidence[:3]],
+            "counter_evidence": [],
+            "risk": "LLM 输出格式不标准，无法自动提取结构化预测。",
+            "source": "llm",
+            "raw_llm_response": llm_text[:8000],
+        })
+
+    if not predictions:
+        # Empty response guard.
+        predictions.append({
+            "id": "P1",
+            "type": "plot_direction",
+            "claim": "LLM 返回了空响应，无法生成预测。",
+            "probability": "low",
+            "confidence": 0.1,
+            "reasoning": ["LLM 输出为空或仅包含空白字符。"],
+            "supporting_evidence": [],
+            "counter_evidence": [],
+            "risk": "LLM 调用失败。",
+            "source": "llm",
+        })
+
+    return predictions
+
+
 def prediction_templates(scope: str) -> list[tuple[str, str, str]]:
     common = [
         ("plot_direction", "当前未解决冲突更可能在下一阶段继续升级，并迫使主角采取更主动的行动。", "high"),
@@ -302,7 +619,12 @@ def build_predictions(
     insufficient: bool,
     global_threads: list[dict[str, Any]],
     recent: list[dict[str, Any]],
+    llm_response: str | None = None,
 ) -> list[dict[str, Any]]:
+    if llm_response and llm_response.strip():
+        return parse_llm_predictions(llm_response, scope, evidence, global_threads, recent, insufficient)
+
+    # -- fallback: template-based predictions (backward compatible) --
     predictions = []
     global_refs = [f"第{item['chapter']}章" for item in global_threads[:3]] or ["全前文暂无明确摘要线索"]
     recent_refs = [item["chunk_id"] for item in recent[-3:]] or [item["chunk_id"] for item in evidence[-2:]]
@@ -327,12 +649,13 @@ def build_predictions(
                 "supporting_evidence": support,
                 "counter_evidence": counter,
                 "risk": "证据不足或作者可能故意误导；若后续出现反向设定，该预测应下调。",
+                "source": "template",
             }
         )
     return predictions
 
 
-def build_prediction_packet(root: Path, book: str, args: Any) -> dict[str, Any]:
+def build_prediction_packet(root: Path, book: str, args: Any, use_llm: bool = False) -> dict[str, Any]:
     manifest = load_manifest(root, book)
     all_chunks = fetch_chunks(root, book)
     anchor_chapter = getattr(args, "anchor_chapter", None)
@@ -352,11 +675,52 @@ def build_prediction_packet(root: Path, book: str, args: Any) -> dict[str, Any]:
     global_threads = extract_global_threads(summaries, evidence, limit=12)
     open_threads = extract_open_threads(summaries, evidence)
     insufficient = len(evidence) < 3 or coverage < 20
+    character_states = infer_character_states(evidence)
     warnings = ["这是基于现有文本的推测，不是作者真实后续。"]
     if bool(getattr(args, "semantic", False)):
         warnings.append("semantic requested but predict currently uses local heuristic scoring; semantic evidence retrieval is not applied in predict yet.")
     if insufficient:
         warnings.append("摘要覆盖或证据数量不足，预测可靠性会下降。")
+
+    # ── Build the LLM prediction prompt ─────────────────────
+    prompt_md = build_prediction_prompt(
+        book={
+            "id": book,
+            "title": manifest.get("title", book),
+            "chapter_count": chapter_count,
+        },
+        question=question,
+        scope=scope,
+        horizon=horizon,
+        summaries=summaries,
+        evidence=evidence,
+        global_threads=global_threads,
+        open_threads=open_threads,
+        recent_context=context,
+        character_states=character_states,
+        anchor_chapter=anchor_chapter,
+        latest_chapter=latest_chapter,
+        coverage=coverage,
+    )
+    prompt_path: str | None = None
+
+    # ── LLM-powered prediction ──────────────────────────────
+    llm_response: str | None = None
+    if use_llm:
+        llm_response = call_claude_for_prediction(prompt_md)
+        if llm_response is None:
+            warnings.append("--llm 已指定但 claude CLI 不可用或调用失败，回退到模板预测。")
+
+    predictions = build_predictions(
+        scope, evidence, insufficient, global_threads, context,
+        llm_response=llm_response,
+    )
+
+    if not use_llm:
+        warnings.append(
+            "当前为模板预测（默认模式）。要使用 LLM 驱动的深度预测，请添加 --llm 参数，"
+            "或使用 --write 生成分析 prompt 文件后手动交由 LLM 分析。"
+        )
 
     return {
         "ok": True,
@@ -374,6 +738,7 @@ def build_prediction_packet(root: Path, book: str, args: Any) -> dict[str, Any]:
             "anchor_chapter": anchor_chapter,
             "anchor_chunk": anchor_chunk,
             "semantic": bool(getattr(args, "semantic", False)),
+            "use_llm": use_llm,
         },
         "current_state": {
             "latest_chapter": latest_chapter,
@@ -381,11 +746,11 @@ def build_prediction_packet(root: Path, book: str, args: Any) -> dict[str, Any]:
             "story_so_far": build_story_so_far(summaries, evidence, latest_chapter),
             "global_threads": global_threads,
             "open_threads": open_threads,
-            "character_states": infer_character_states(evidence),
+            "character_states": character_states,
             "setting_constraints": infer_setting_constraints(evidence),
         },
         "evidence": evidence,
-        "predictions": build_predictions(scope, evidence, insufficient, global_threads, context),
+        "predictions": predictions,
         "alternative_scenarios": [
             {"name": "保守走向", "summary": "已有冲突按当前方向推进，伏笔逐步回收。", "probability": "medium"},
             {"name": "反转走向", "summary": "关键人物立场或已知设定被重新解释，改变主线判断。", "probability": "low"},
@@ -399,6 +764,10 @@ def build_prediction_packet(root: Path, book: str, args: Any) -> dict[str, Any]:
         "missing_reading_suggestions": ["提高 summary coverage，或先完成 balanced reading session。"] if insufficient else [],
         "recommended_next_reads": [item["chapter"] for item in context[-3:]],
         "warnings": warnings,
+        # Fields for LLM-prompt mode
+        "prompt_md": prompt_md if not use_llm else None,
+        "prompt_path": prompt_path,
+        "llm_response": llm_response,
     }
 
 
@@ -417,6 +786,7 @@ def render_prediction_packet(packet: dict[str, Any]) -> str:
             f"- 章节数：{book['chapter_count']}",
             f"- 摘要覆盖率：{book['summary_coverage_percent']}%",
             f"- 问题：{goal.get('question') or '全局后续剧情预测'}",
+            f"- 分析模式：{'LLM 驱动' if goal.get('use_llm') else '模板（默认）'}",
             "",
         ]
     )
@@ -426,7 +796,11 @@ def render_prediction_packet(packet: dict[str, Any]) -> str:
         if not items:
             lines.append("- 暂无。")
         for item in items:
-            lines.append(f"- {item['id']} {item['claim']}（confidence={item['confidence']}，evidence={', '.join(item['supporting_evidence'])}）")
+            src = f" [source: {item.get('source', 'template')}]"
+            lines.append(f"- {item['id']} {item['claim']}（confidence={item['confidence']}，evidence={', '.join(item['supporting_evidence'])}）{src}")
+            if item.get("reasoning") and item.get("source") == "llm":
+                for reason in item["reasoning"][:3]:
+                    lines.append(f"  - {reason}")
         lines.append("")
     lines.append("## 关键伏笔与待回收点")
     for item in packet["current_state"]["global_threads"][:8]:
@@ -436,10 +810,17 @@ def render_prediction_packet(packet: dict[str, Any]) -> str:
         lines.append(f"- {item['state']}（{item['source']}）")
     lines.extend(["", "## 反证与不确定性"])
     for item in packet["predictions"]:
-        lines.append(f"- {item['id']}：{item['risk']}")
+        lines.append(f"- {item['id']}：{item.get('risk', '')}")
     lines.extend(["", "## 下一章观察清单"])
     for item in packet["watchlist"]:
         lines.append(f"- {item}")
+    if packet.get("prompt_path"):
+        lines.extend(["", "## LLM 分析 Prompt"])
+        lines.append(f"已保存至：{packet['prompt_path']}")
+    if packet.get("llm_response"):
+        lines.extend(["", "## LLM 原始回复（摘要）"])
+        excerpt = packet["llm_response"][:400].replace("\n", " ")
+        lines.append(f"- {excerpt}...")
     lines.extend(["", "## 免责声明"])
     for item in packet["warnings"]:
         lines.append(f"- {item}")
@@ -450,6 +831,12 @@ def write_prediction_packet(root: Path, book: str, packet: dict[str, Any]) -> li
     target = book_dir(root, book) / "predictions"
     target.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    prompt_path: Path | None = None
+    prompt_latest: Path | None = None
+    if packet.get("prompt_md"):
+        prompt_path = target / f"{stamp}-prediction-prompt.md"
+        prompt_latest = target / "prediction-prompt-latest.md"
+        packet["prompt_path"] = str(prompt_path)
     markdown = render_prediction_packet(packet)
     json_text = json.dumps(packet, ensure_ascii=False, indent=2) + "\n"
     paths = []
@@ -461,4 +848,11 @@ def write_prediction_packet(root: Path, book: str, packet: dict[str, Any]) -> li
     ):
         path.write_text(content, encoding="utf-8")
         paths.append(str(path))
+
+    # Write the LLM-ready prediction prompt as a standalone file.
+    if packet.get("prompt_md") and prompt_path and prompt_latest:
+        prompt_path.write_text(packet["prompt_md"], encoding="utf-8")
+        prompt_latest.write_text(packet["prompt_md"], encoding="utf-8")
+        paths.extend([str(prompt_path), str(prompt_latest)])
+
     return paths

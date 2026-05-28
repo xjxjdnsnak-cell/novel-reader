@@ -3,8 +3,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from novel_reader.intent_router import classify_request
+from novel_reader import predictor
 from novel_reader.web_app import make_app
 
 from test_reading_session import import_book, load_json, run_cli, valid_l1_note, valid_l2_note
@@ -144,6 +146,80 @@ def test_predict_write_creates_latest_markdown_and_json(tmp_path: Path):
     assert store / book / "predictions" / "prediction-latest.json" in paths
     for path in paths:
         assert path.exists()
+    latest_json = json.loads((store / book / "predictions" / "prediction-latest.json").read_text(encoding="utf-8"))
+    latest_md = (store / book / "predictions" / "prediction-latest.md").read_text(encoding="utf-8")
+    assert latest_json["prompt_path"]
+    assert "prediction-prompt" in latest_md
+
+
+def test_predict_llm_falls_back_when_claude_unavailable(tmp_path: Path, monkeypatch):
+    store, book = import_book(tmp_path)
+    monkeypatch.setattr(predictor.shutil, "which", lambda name: None)
+    args = SimpleNamespace(
+        question="后续剧情可能怎么发展？",
+        scope="general",
+        horizon="next-arc",
+        anchor_chapter=None,
+        anchor_chunk=None,
+        context_chunks=5,
+        top=8,
+        semantic=False,
+    )
+
+    packet = predictor.build_prediction_packet(store, book, args, use_llm=True)
+
+    assert packet["ok"] is True
+    assert packet["prediction_goal"]["use_llm"] is True
+    assert packet["predictions"][0]["source"] == "template"
+    assert any("claude CLI" in item for item in packet["warnings"])
+
+
+def test_predict_llm_parses_claude_json_predictions(tmp_path: Path, monkeypatch):
+    store, book = import_book(tmp_path)
+    llm_payload = {
+        "result": json.dumps(
+            {
+                "predictions": [
+                    {
+                        "id": "P1",
+                        "type": "plot_direction",
+                        "claim": "主线冲突会继续升级。",
+                        "probability": "high",
+                        "confidence": 0.77,
+                        "reasoning": ["证据显示冲突尚未解决。"],
+                        "supporting_evidence": ["c0001-001"],
+                        "counter_evidence": [],
+                        "risk": "证据仍有限。",
+                    }
+                ],
+                "alternative_scenarios": [],
+                "watchlist": [],
+            },
+            ensure_ascii=False,
+        )
+    }
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps(llm_payload, ensure_ascii=False), stderr="")
+
+    monkeypatch.setattr(predictor.shutil, "which", lambda name: "claude")
+    monkeypatch.setattr(predictor.subprocess, "run", fake_run)
+    args = SimpleNamespace(
+        question="后续剧情可能怎么发展？",
+        scope="general",
+        horizon="next-arc",
+        anchor_chapter=None,
+        anchor_chunk=None,
+        context_chunks=5,
+        top=8,
+        semantic=False,
+    )
+
+    packet = predictor.build_prediction_packet(store, book, args, use_llm=True)
+
+    assert packet["predictions"][0]["source"] == "llm"
+    assert packet["predictions"][0]["claim"] == "主线冲突会继续升级。"
+    assert packet["predictions"][0]["confidence"] == 0.77
 
 
 def test_predict_write_documents_are_visible_in_web_documents(tmp_path: Path, monkeypatch):
