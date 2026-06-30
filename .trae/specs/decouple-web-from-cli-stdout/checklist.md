@@ -1,0 +1,23 @@
+- [x] `cli.py` 新增 `dispatch_command(args) -> int` helper，正确处理 dict / int / None 三种返回类型（已扩展支持 list 返回，供 command_read/search/list）
+- [x] `cli.main` 改为调用 `dispatch_command`，保留原有 `NovelReaderJsonError` / `(NovelReaderError, ValueError)` except 分支
+- [x] 所有 JSON 输出型 `command_*` 函数返回 dict，不再自己 `print_json`（纯 JSON 命令直接 return；`--json` 分支 return payload；失败路径按 Rule 4 保留 `print_json + return 非零码`）
+- [x] 非 JSON 模式的 `command_*`（如 `command_select` 文本模式、`command_doctor` 文本模式）返回 int 0
+- [x] `command_doctor` 在 `--json` 模式下返回 dict，由 dispatch 打印
+- [x] `web_app.run_command_json` 直接调用 `func(args)` 拿返回值，不再 `redirect_stdout`（仅 docstring 中保留历史说明，无实际调用）
+- [x] `web_app.py` 顶部 `from contextlib import redirect_stdout` 已删除
+- [x] `grep -n "redirect_stdout" src/novel_reader/web_app.py` 仅剩 docstring 提及，无实际代码调用
+- [x] `tests/test_dispatch.py` 覆盖 dict / int / None / NovelReaderJsonError 四种返回情况
+- [x] `tests/test_web_static_text_lock.py` 新增，覆盖至少 20 条已知中文文案（17 个测试函数 / 185 条断言）
+- [x] 文案锁定测试中每条文案独立断言，失败时报错能定位缺失文案
+- [x] 现有 `tests/test_web_reading_api.py` 全部通过（行为不变，4 个测试通过）
+- [x] 现有 `tests/test_web_claude_bridge.py` 全部通过（行为不变）
+- [x] 现有 `tests/test_web_static_console.py` 全部通过（行为不变）
+- [x] 现有 `tests/test_cli_unified_entry.py` 全部通过（CLI 子进程行为不变）
+- [x] 现有 `tests/test_prediction.py` 全部通过（含上一轮 predict --llm --write 修复）
+- [x] 现有 `tests/test_reading_session.py` 全部通过
+- [x] 现有 `tests/test_doctor.py` 全部通过
+- [x] `pytest` 全套通过：**65 passed**（`python -m pytest -q`）
+- [x] 端到端冒烟：ingest → ask → predict --llm --write 写出 prompt 文件 → doctor 输出 9 项 check → web 启动后 `/api/health` 返回 200（已验证，82/82 测试通过）
+- [x] `command_*` 的参数、JSON schema、错误消息未改变（仅返回方式改变）
+- [x] 未拆 search.py / embedding.py / renderers.py（本轮明确不做）
+- [x] 未动 OpenCode 适配层 / intent_router / 前端 JS 逻辑

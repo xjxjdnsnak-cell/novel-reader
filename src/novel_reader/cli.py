@@ -152,6 +152,26 @@ from .storage import (  # noqa: E402
     save_manifest,
 )
 
+# Re-export search+embedding helpers so existing call sites inside cli.py and
+# external callers (web_app, tests) keep working without changes.
+from .search import (  # noqa: E402
+    cosine,
+    discover_local_qwen_embedding,
+    embed_texts,
+    fts_query,
+    fts_search,
+    like_search,
+    local_config_path,
+    local_qwen_embedding_available,
+    local_qwen_embedding_health,
+    read_local_launcher_config,
+    resolve_embedding_config,
+    search_book,
+    semantic_search,
+    snippet,
+    split_terms,
+)
+
 
 def init_db(con: sqlite3.Connection) -> bool:
     con.executescript(
@@ -408,19 +428,16 @@ def command_ingest(args: argparse.Namespace) -> int:
     }
     save_manifest(root, manifest)
 
-    print_json(
-        {
-            "ok": True,
-            "book_id": book_id,
-            "title": title,
-            "chapters": len(chapters),
-            "chunks": len(chunks),
-            "chars": len(text),
-            "store": str(target),
-            "fts_enabled": fts_enabled,
-        }
-    )
-    return 0
+    return {
+        "ok": True,
+        "book_id": book_id,
+        "title": title,
+        "chapters": len(chapters),
+        "chunks": len(chunks),
+        "chars": len(text),
+        "store": str(target),
+        "fts_enabled": fts_enabled,
+    }
 
 
 def fetch_summary_rows(root: Path, book_id: str) -> dict[int, sqlite3.Row]:
@@ -456,7 +473,9 @@ def command_status(args: argparse.Namespace) -> int:
         },
         "store": str(book_dir(root, args.book)),
     }
-    print_json(result) if args.json else print_status(result)
+    if args.json:
+        return result
+    print_status(result)
     return 0
 
 
@@ -512,8 +531,7 @@ def command_read(args: argparse.Namespace) -> int:
     if not rows:
         raise NovelReaderError("没有找到匹配章节或块。")
     if args.json:
-        print_json([dict(row) for row in rows])
-        return 0
+        return [dict(row) for row in rows]
 
     for row in rows:
         print(f"\n--- {row['chunk_id']} | 第 {row['chapter_index']} 章：{row['chapter_title']} | 行 {row['line_start']}-{row['line_end']} ---\n")
@@ -521,315 +539,11 @@ def command_read(args: argparse.Namespace) -> int:
     return 0
 
 
-def split_terms(query: str) -> list[str]:
-    normalized = unicodedata.normalize("NFKC", query)
-    normalized = re.sub(
-        r"(为什么|為什麼|是什么|是什麼|在哪里|在哪裡|怎么|怎麼|如何|是否|是不是|谁|誰|什么|什麼|哪[个個]|原因|结果|結果)",
-        " ",
-        normalized,
-    )
-    parts = [
-        part.strip()
-        for part in re.split(r"[\s,，。！？!?；;：:、（）()《》<>「」『』“”\"'`]+", normalized)
-        if part.strip()
-    ]
-    stopwords = {"的", "了", "呢", "吗", "嗎", "吧", "啊", "呀", "以及", "和", "与", "與"}
-    terms: list[str] = []
-    for part in parts:
-        if part in stopwords:
-            continue
-        if len(part) >= 2:
-            terms.append(part)
-    if not terms and query.strip():
-        terms.append(query.strip())
-    return list(dict.fromkeys(terms))
-
-
-def snippet(text: str, terms: list[str], width: int) -> str:
-    lower = text.lower()
-    pos = -1
-    for term in terms:
-        pos = lower.find(term.lower())
-        if pos >= 0:
-            break
-    if pos < 0:
-        pos = 0
-    start = max(pos - width // 2, 0)
-    end = min(start + width, len(text))
-    start = max(end - width, 0)
-    excerpt = text[start:end].replace("\n", " ")
-    return re.sub(r"\s+", " ", excerpt).strip()
-
-
-def like_search(con: sqlite3.Connection, query: str, top: int, context_chars: int) -> list[dict[str, Any]]:
-    terms = split_terms(query) or [query]
-    rows = list(con.execute("SELECT * FROM chunks"))
-    results = []
-    for row in rows:
-        text_lower = row["text"].lower()
-        title_lower = row["chapter_title"].lower()
-        score = 0
-        for term in terms:
-            term_lower = term.lower()
-            score += text_lower.count(term_lower) * 3
-            score += title_lower.count(term_lower)
-        if query and query.lower() in text_lower:
-            score += 8
-        if score > 0:
-            results.append(
-                {
-                    "chunk_id": row["chunk_id"],
-                    "chapter_index": row["chapter_index"],
-                    "chapter_title": row["chapter_title"],
-                    "line_start": row["line_start"],
-                    "line_end": row["line_end"],
-                    "score": score,
-                    "source": "like",
-                    "snippet": snippet(row["text"], terms, context_chars),
-                }
-            )
-    results.sort(key=lambda item: item["score"], reverse=True)
-    return results[:top]
-
-
-def fts_query(query: str) -> str:
-    terms = split_terms(query)
-    if not terms:
-        return '""'
-    return " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
-
-
-def fts_search(con: sqlite3.Connection, query: str, top: int, context_chars: int) -> list[dict[str, Any]]:
-    try:
-        rows = list(
-            con.execute(
-                """
-                SELECT c.*, bm25(chunk_fts) AS rank
-                FROM chunk_fts
-                JOIN chunks c ON c.chunk_id = chunk_fts.chunk_id
-                WHERE chunk_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (fts_query(query), top),
-            )
-        )
-    except sqlite3.Error:
-        return []
-    terms = split_terms(query) or [query]
-    return [
-        {
-            "chunk_id": row["chunk_id"],
-            "chapter_index": row["chapter_index"],
-            "chapter_title": row["chapter_title"],
-            "line_start": row["line_start"],
-            "line_end": row["line_end"],
-            "score": float(row["rank"]),
-            "source": "fts",
-            "snippet": snippet(row["text"], terms, context_chars),
-        }
-        for row in rows
-    ]
-
-
-def cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if not na or not nb:
-        return 0.0
-    return dot / (na * nb)
-
-
-def local_config_path() -> Path:
-    return Path(__file__).resolve().parents[2] / ".novel-reader-local" / "config.json"
-
-
-def read_local_launcher_config() -> dict[str, Any]:
-    path = local_config_path()
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def local_qwen_embedding_health(port: int = 8081) -> dict[str, Any] | None:
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        if data.get("ok") and data.get("model_loaded"):
-            data["port"] = port
-            return data
-        return None
-    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
-
-
-def local_qwen_embedding_available(port: int = 8081) -> bool:
-    return local_qwen_embedding_health(port) is not None
-
-
-def discover_local_qwen_embedding() -> dict[str, Any] | None:
-    ports: list[int] = []
-    config = read_local_launcher_config()
-    if config.get("port"):
-        try:
-            ports.append(int(config["port"]))
-        except (TypeError, ValueError):
-            pass
-    base_url = os.environ.get("NOVEL_READER_EMBED_BASE_URL", "")
-    match = re.search(r":(\d+)(?:/|$)", base_url)
-    if match:
-        ports.append(int(match.group(1)))
-    ports.extend(range(8081, 8086))
-
-    seen = set()
-    for port in ports:
-        if port in seen:
-            continue
-        seen.add(port)
-        health = local_qwen_embedding_health(port)
-        if health:
-            return health
-    return None
-
-
-def resolve_embedding_config(model: str | None = None) -> tuple[str, str, str]:
-    base_url = os.environ.get("NOVEL_READER_EMBED_BASE_URL", "").rstrip("/")
-    api_key = os.environ.get("NOVEL_READER_EMBED_API_KEY", "")
-    resolved_model = model or os.environ.get("NOVEL_READER_EMBED_MODEL", "")
-
-    local_health = discover_local_qwen_embedding()
-    if not base_url and local_health:
-        base_url = f"http://127.0.0.1:{local_health.get('port', 8081)}/v1"
-        api_key = api_key or "local"
-        resolved_model = resolved_model or local_health.get("model") or "qwen3-embedding-0.6b"
-
-    if not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not resolved_model:
-        resolved_model = "text-embedding-3-small"
-    if not api_key and (base_url.startswith("http://127.0.0.1") or base_url.startswith("http://localhost")):
-        api_key = "local"
-
-    return api_key, base_url, resolved_model
-
-
-def embed_texts(texts: list[str], provider: str, model: str) -> list[list[float]]:
-    if provider != "openai-compatible":
-        raise NovelReaderError("目前只实现 openai-compatible embedding provider。")
-    api_key, base_url, model = resolve_embedding_config(model)
-    if not api_key:
-        raise NovelReaderError("未配置 NOVEL_READER_EMBED_API_KEY，无法启用 embedding。")
-    payload = json.dumps({"model": model, "input": texts}).encode("utf-8")
-    request = urllib.request.Request(
-        f"{base_url}/embeddings",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise NovelReaderError(f"embedding 请求失败：{exc}") from exc
-    return [item["embedding"] for item in data["data"]]
-
-
-def semantic_search(
-    root: Path,
-    book_id: str,
-    query: str,
-    provider: str,
-    model: str,
-    top: int,
-    context_chars: int,
-) -> list[dict[str, Any]]:
-    query_vector = embed_texts([query], provider, model)[0]
-    con = open_db(root, book_id)
-    try:
-        rows = list(
-            con.execute(
-                """
-                SELECT e.vector_json, c.*
-                FROM embeddings e
-                JOIN chunks c ON c.chunk_id = e.chunk_id
-                WHERE e.provider = ? AND e.model = ?
-                """,
-                (provider, model),
-            )
-        )
-        scored = []
-        terms = split_terms(query) or [query]
-        for row in rows:
-            vector = json.loads(row["vector_json"])
-            scored.append(
-                {
-                    "chunk_id": row["chunk_id"],
-                    "chapter_index": row["chapter_index"],
-                    "chapter_title": row["chapter_title"],
-                    "line_start": row["line_start"],
-                    "line_end": row["line_end"],
-                    "score": round(cosine(query_vector, vector), 6),
-                    "source": "embedding",
-                    "snippet": snippet(row["text"], terms, context_chars),
-                }
-            )
-        scored.sort(key=lambda item: item["score"], reverse=True)
-        return scored[:top]
-    finally:
-        con.close()
-
-
-def search_book(
-    root: Path,
-    book_id: str,
-    query: str,
-    top: int,
-    context_chars: int,
-    semantic: bool = False,
-) -> list[dict[str, Any]]:
-    manifest = load_manifest(root, book_id)
-    if semantic and manifest.get("embedding", {}).get("enabled"):
-        emb = manifest["embedding"]
-        return semantic_search(root, book_id, query, emb["provider"], emb["model"], top, context_chars)
-
-    con = open_db(root, book_id)
-    try:
-        results = []
-        if manifest.get("fts_enabled"):
-            results.extend(fts_search(con, query, top, context_chars))
-        results.extend(like_search(con, query, top * 2, context_chars))
-
-        deduped: dict[str, dict[str, Any]] = {}
-        for item in results:
-            existing = deduped.get(item["chunk_id"])
-            if not existing:
-                deduped[item["chunk_id"]] = item
-            elif existing["source"] == "fts" and item["source"] == "like":
-                item["source"] = "fts+like"
-                item["score"] = max(float(existing["score"]), float(item["score"]))
-                deduped[item["chunk_id"]] = item
-        merged = list(deduped.values())
-        merged.sort(key=lambda item: (item["source"] != "like", float(item["score"])), reverse=True)
-        return merged[:top]
-    finally:
-        con.close()
-
-
 def command_search(args: argparse.Namespace) -> int:
     root = storage_root(args)
     results = search_book(root, args.book, args.query, args.top, args.context_chars, args.semantic)
     if args.json:
-        print_json(results)
-        return 0
+        return results
     if not results:
         print("没有找到匹配片段。可以换关键词，或在启用 embedding 后使用 --semantic。")
         return 0
@@ -860,7 +574,9 @@ def command_ask(args: argparse.Namespace) -> int:
         ],
         "evidence": results,
     }
-    print_json(packet) if args.json else print_qa_packet(packet)
+    if args.json:
+        return packet
+    print_qa_packet(packet)
     return 0
 
 
@@ -918,8 +634,7 @@ def command_note(args: argparse.Namespace) -> int:
         con.commit()
     finally:
         con.close()
-    print_json({"ok": True, "chapter": args.chapter, "summary_path": str(path)})
-    return 0
+    return {"ok": True, "chapter": args.chapter, "summary_path": str(path)}
 
 
 def command_read_session(args: argparse.Namespace) -> int:
@@ -934,15 +649,13 @@ def command_read_session(args: argparse.Namespace) -> int:
         focus_chapter=args.focus_chapter,
         after_chapter=args.after_chapter,
     )
-    print_json(result)
-    return 0
+    return result
 
 
 def command_read_next(args: argparse.Namespace) -> int:
     root = storage_root(args)
     result = build_read_next(root, args.session_id, args.batch_chapters, args.chapter)
-    print_json(result)
-    return 0
+    return result
 
 
 def command_submit_note(args: argparse.Namespace) -> int:
@@ -954,21 +667,24 @@ def command_submit_note(args: argparse.Namespace) -> int:
     else:
         text = sys.stdin.read()
     result = submit_note(root, args.session_id, args.chapter, text)
+    if result.get("ok"):
+        return result
     print_json(result)
-    return 0 if result.get("ok") else 1
+    return 1
 
 
 def command_reading_status(args: argparse.Namespace) -> int:
     root = storage_root(args)
-    print_json(calculate_status(root, args.session_id))
-    return 0
+    return calculate_status(root, args.session_id)
 
 
 def command_finalize_reading(args: argparse.Namespace) -> int:
     root = storage_root(args)
     result = finalize_session(root, args.session_id)
+    if result.get("ok", result.get("full_scope_allowed")):
+        return result
     print_json(result)
-    return 0 if result.get("ok", result.get("full_scope_allowed")) else 1
+    return 1
 
 
 def load_summaries(book_path: Path) -> list[tuple[int, str]]:
@@ -1033,9 +749,9 @@ def command_outline(args: argparse.Namespace) -> int:
     if args.write:
         out = target / "maps" / "outline.md"
         out.write_text(outline, encoding="utf-8")
-        print_json({"ok": True, "path": str(out)})
+        return {"ok": True, "path": str(out)}
     elif getattr(args, "json", False):
-        print_json({"ok": True, "text": outline})
+        return {"ok": True, "text": outline}
     else:
         print(outline)
     return 0
@@ -1085,8 +801,7 @@ def command_map(args: argparse.Namespace) -> int:
     content = render_map(manifest, load_summaries(target))
     out = target / "maps" / "book-map.md"
     out.write_text(content, encoding="utf-8")
-    print_json({"ok": True, "path": str(out)})
-    return 0
+    return {"ok": True, "path": str(out)}
 
 
 def render_analysis(manifest: dict[str, Any], summaries: list[tuple[int, str]]) -> str:
@@ -1131,8 +846,7 @@ def command_analyze(args: argparse.Namespace) -> int:
     content = render_analysis(manifest, load_summaries(target))
     out = target / "reports" / "writing-analysis.md"
     out.write_text(content, encoding="utf-8")
-    print_json({"ok": True, "path": str(out)})
-    return 0
+    return {"ok": True, "path": str(out)}
 
 
 def percentile(values: list[int], ratio: float) -> float:
@@ -1471,8 +1185,7 @@ def command_style(args: argparse.Namespace) -> int:
     require_full_scope(root, args.book, "style", args)
     packet = build_style_packet(root, args.book, args.scene)
     if args.json:
-        print_json(packet)
-        return 0
+        return packet
 
     profile = render_style_profile(packet)
     if args.write:
@@ -1482,20 +1195,18 @@ def command_style(args: argparse.Namespace) -> int:
         if args.scene:
             out = style_dir / f"scene-{args.scene}.md"
             out.write_text(profile, encoding="utf-8")
-            print_json({"ok": True, "paths": [str(out)]})
-        else:
-            files = {
-                "style-profile.md": profile,
-                "scene-styles.md": render_scene_styles(packet),
-                "style-guide.md": render_style_guide(packet),
-            }
-            paths = []
-            for name, content in files.items():
-                out = style_dir / name
-                out.write_text(content, encoding="utf-8")
-                paths.append(str(out))
-            print_json({"ok": True, "paths": paths})
-        return 0
+            return {"ok": True, "paths": [str(out)]}
+        files = {
+            "style-profile.md": profile,
+            "scene-styles.md": render_scene_styles(packet),
+            "style-guide.md": render_style_guide(packet),
+        }
+        paths = []
+        for name, content in files.items():
+            out = style_dir / name
+            out.write_text(content, encoding="utf-8")
+            paths.append(str(out))
+        return {"ok": True, "paths": paths}
 
     print(profile)
     return 0
@@ -1850,14 +1561,11 @@ def command_continue(args: argparse.Namespace) -> int:
     if args.write:
         packet["output_paths"] = write_continuation_pack(root, args.book, packet)
         if args.json:
-            print_json(packet)
-        else:
-            print_json({"ok": True, "paths": packet["output_paths"]})
-        return 0
+            return packet
+        return {"ok": True, "paths": packet["output_paths"]}
     if args.json:
-        print_json(packet)
-    else:
-        print(render_continuation_pack(packet))
+        return packet
+    print(render_continuation_pack(packet))
     return 0
 
 
@@ -1885,9 +1593,8 @@ def command_predict(args: argparse.Namespace) -> int:
     if args.write:
         packet["output_paths"] = write_prediction_packet(root, args.book, packet)
     if args.json:
-        print_json(packet)
-    else:
-        print(render_prediction_packet(packet))
+        return packet
+    print(render_prediction_packet(packet))
     return 0
 
 
@@ -1948,17 +1655,21 @@ def command_embed(args: argparse.Namespace) -> int:
         "updated_at": now_iso(),
     }
     save_manifest(root, manifest)
-    print_json({"ok": True, "provider": provider, "model": model, "chunks": done})
-    return 0
+    return {"ok": True, "provider": provider, "model": model, "chunks": done}
 
 
 def command_output(func: Any, args: argparse.Namespace) -> tuple[int, Any]:
     buffer = io.StringIO()
     try:
         with contextlib.redirect_stdout(buffer):
-            code = int(func(args))
+            result = func(args)
     except NovelReaderJsonError as exc:
         return exc.return_code, exc.payload
+    if isinstance(result, (dict, list)):
+        return 0, result
+    if result is None:
+        return 0, {}
+    code = int(result)
     text = buffer.getvalue().strip()
     if not text:
         return code, {}
@@ -2103,10 +1814,18 @@ def command_do(args: argparse.Namespace) -> int:
         code, payload = command_output(func, routed_args)
         if code != 0 and isinstance(payload, dict) and "error" in payload:
             print_json({"ok": False, "route": route.to_dict(), "error": payload["error"]})
-        else:
-            print_json({"ok": code == 0, "route": route.to_dict(), "payload": payload})
-        return code
-    return int(func(routed_args))
+            return code
+        if code != 0:
+            print_json({"ok": False, "route": route.to_dict(), "payload": payload})
+            return code
+        return {"ok": True, "route": route.to_dict(), "payload": payload}
+    result = func(routed_args)
+    if isinstance(result, (dict, list)):
+        print_json(result)
+        return 0
+    if result is None:
+        return 0
+    return int(result)
 
 
 def build_prose_generation_prompt(packet: dict[str, Any]) -> str:
@@ -2156,11 +1875,10 @@ def command_write_next(args: argparse.Namespace) -> int:
     packet = build_continuation_packet(root, continuation_args)
     packet["prose_generation_prompt"] = build_prose_generation_prompt(packet)
     if args.json:
-        print_json({"ok": True, "package": packet, "prose_generation_prompt": packet["prose_generation_prompt"]})
-    else:
-        print(render_continuation_pack(packet))
-        print("\n## Prose Generation Prompt")
-        print(packet["prose_generation_prompt"])
+        return {"ok": True, "package": packet, "prose_generation_prompt": packet["prose_generation_prompt"]}
+    print(render_continuation_pack(packet))
+    print("\n## Prose Generation Prompt")
+    print(packet["prose_generation_prompt"])
     return 0
 
 
@@ -2173,10 +1891,9 @@ def command_list(args: argparse.Namespace) -> int:
             if manifest_file.exists():
                 books.append(json.loads(manifest_file.read_text(encoding="utf-8")))
     if args.json:
-        print_json(books)
-    else:
-        for book in books:
-            print(f"{book['book_id']}\t{book['title']}\t{book['chapter_count']} chapters")
+        return books
+    for book in books:
+        print(f"{book['book_id']}\t{book['title']}\t{book['chapter_count']} chapters")
     return 0
 
 
@@ -2196,13 +1913,11 @@ def command_select(args: argparse.Namespace) -> int:
             "selected_at": now_iso(),
         }
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print_json({"ok": True, "selected": data, "path": str(path)})
-        return 0
+        return {"ok": True, "selected": data, "path": str(path)}
 
     path = selection_path(root)
     if not path.exists():
-        print_json({"ok": True, "selected": None})
-        return 0
+        return {"ok": True, "selected": None}
     print(path.read_text(encoding="utf-8").strip())
     return 0
 
@@ -2363,14 +2078,13 @@ def command_doctor(args: argparse.Namespace) -> int:
     root = storage_root(args)
     report = run_doctor(root)
     if args.json:
-        print_json(report)
-    else:
-        print(f"novel-reader doctor — {report['checks'].__len__()} checks")
-        for c in report["checks"]:
-            mark = "OK " if c["ok"] else "FAIL"
-            sev = c["severity"].upper()
-            print(f"  [{mark}][{sev}] {c['name']}: {c['message']}")
-        print(f"\noverall: {'OK' if report['ok'] else 'ISSUES'}")
+        return report
+    print(f"novel-reader doctor — {report['checks'].__len__()} checks")
+    for c in report["checks"]:
+        mark = "OK " if c["ok"] else "FAIL"
+        sev = c["severity"].upper()
+        print(f"  [{mark}][{sev}] {c['name']}: {c['message']}")
+    print(f"\noverall: {'OK' if report['ok'] else 'ISSUES'}")
     return 0 if report["ok"] else 0  # doctor never exits non-zero; warnings are not failures
 
 
@@ -2590,11 +2304,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def dispatch_command(args: argparse.Namespace) -> int:
+    """Execute the argparse-bound command and translate its return value.
+
+    Supported return types from ``command_*`` functions:
+    - ``dict``: structured result. ``print_json`` it and return 0.
+    - ``int``: exit code with no JSON output (e.g. text-mode commands).
+    - ``None``: treat as success with no output, return 0.
+
+    This helper lets ``command_*`` functions return structured data instead of
+    printing to stdout themselves, so web_app and tests can call them directly
+    without ``redirect_stdout`` capture.
+    """
+    result = args.func(args)
+    if isinstance(result, (dict, list)):
+        print_json(result)
+        return 0
+    if result is None:
+        return 0
+    return int(result)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        return int(args.func(args))
+        return dispatch_command(args)
     except NovelReaderJsonError as exc:
         print_json(exc.payload)
         return exc.return_code

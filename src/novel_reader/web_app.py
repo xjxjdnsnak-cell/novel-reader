@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 import secrets
@@ -9,7 +8,6 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
-from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, Callable
 
@@ -422,22 +420,24 @@ def validate_scope(scope: Any) -> str:
 
 
 def run_command_json(func: Callable[[argparse.Namespace], int], **kwargs: Any) -> dict[str, Any]:
-    buffer = io.StringIO()
+    """Call a cli.command_* function directly and return its structured result.
+
+    Command functions now return dict / int / None instead of printing JSON to
+    stdout. This removes the previous ``redirect_stdout`` + ``json.loads``
+    capture path, so debug ``print`` statements inside commands can no longer
+    corrupt the web API response.
+    """
     args = namespace(**kwargs)
-    try:
-        with redirect_stdout(buffer):
-            result = func(args)
-    except cli.NovelReaderJsonError:
-        raise
-    text = buffer.getvalue().strip()
-    if result not in (0, None):
-        raise cli.NovelReaderError(text or f"命令失败：{result}")
-    if not text:
+    result = func(args)
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, list):
+        # command_list returns a bare list in JSON mode; wrap for web consumers.
+        return {"items": result, "ok": True}
+    if result is None or result == 0:
         return {"ok": True}
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {"ok": True, "text": text}
+    # Non-zero int return code without a dict payload.
+    raise cli.NovelReaderError(f"命令失败：{result}")
 
 
 def ok(data: dict[str, Any]) -> Any:
