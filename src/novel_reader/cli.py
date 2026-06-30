@@ -125,45 +125,32 @@ def slugify(value: str) -> str:
 
 
 def storage_root(args: argparse.Namespace) -> Path:
-    if getattr(args, "store", None):
-        return Path(args.store).expanduser().resolve()
-    env_root = os.environ.get("NOVEL_READER_HOME")
-    if env_root:
-        return Path(env_root).expanduser().resolve()
-    return (Path.cwd() / ".novel-reader").resolve()
+    """Thin wrapper over :func:`novel_reader.storage.storage_root`.
+
+    Kept so that existing ``command_*`` call sites that pass ``args`` do not
+    need to change. Resolution priority: ``args.store`` > ``NOVEL_READER_HOME``
+    > ``./.novel-reader``.
+    """
+    from .storage import storage_root as _storage_root
+
+    return _storage_root(getattr(args, "store", None))
 
 
-def book_dir(root: Path, book_id: str) -> Path:
-    candidate = Path(book_id)
-    if candidate.exists() and candidate.is_dir():
-        return candidate.resolve()
-    return root / book_id
-
-
-def manifest_path(root: Path, book_id: str) -> Path:
-    return book_dir(root, book_id) / "manifest.json"
-
-
-def load_manifest(root: Path, book_id: str) -> dict[str, Any]:
-    path = manifest_path(root, book_id)
-    if not path.exists():
-        raise NovelReaderError(f"找不到书籍索引：{book_id}。先运行 novel-reader ingest <file>。")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def save_manifest(root: Path, manifest: dict[str, Any]) -> None:
-    path = manifest_path(root, manifest["book_id"])
-    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def db_path(root: Path, book_id: str) -> Path:
-    return book_dir(root, book_id) / "index.sqlite"
-
-
-def open_db(root: Path, book_id: str) -> sqlite3.Connection:
-    con = sqlite3.connect(db_path(root, book_id))
-    con.row_factory = sqlite3.Row
-    return con
+# Re-export shared storage helpers so existing call sites inside cli.py and
+# external callers (web_app, tests) keep working without changes.
+from .storage import (  # noqa: E402
+    StorageError,
+    book_dir,
+    chapters_path,
+    db_path,
+    fetch_all_chunks,
+    fetch_chapters,
+    fetch_chunks,
+    load_manifest,
+    manifest_path,
+    open_db,
+    save_manifest,
+)
 
 
 def init_db(con: sqlite3.Connection) -> bool:
@@ -434,13 +421,6 @@ def command_ingest(args: argparse.Namespace) -> int:
         }
     )
     return 0
-
-
-def fetch_chapters(root: Path, book_id: str) -> list[dict[str, Any]]:
-    path = book_dir(root, book_id) / "chapters.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def fetch_summary_rows(root: Path, book_id: str) -> dict[int, sqlite3.Row]:
@@ -1261,17 +1241,6 @@ def text_stats(text: str) -> dict[str, Any]:
         "punctuation_per_1k": {key: round(value * 1000 / chars, 2) for key, value in punctuation.most_common(12)},
         "top_terms": [{"term": term, "count": count} for term, count in ngrams.most_common(20)],
     }
-
-
-def fetch_all_chunks(root: Path, book_id: str) -> list[dict[str, Any]]:
-    con = open_db(root, book_id)
-    try:
-        return [
-            dict(row)
-            for row in con.execute("SELECT * FROM chunks ORDER BY chapter_index, chunk_index")
-        ]
-    finally:
-        con.close()
 
 
 def chunk_scene_score(text: str, scene: str) -> int:
@@ -2238,6 +2207,173 @@ def command_select(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── doctor: health check ─────────────────────────────────
+def _doctor_check(name: str, ok: bool, message: str, severity: str) -> dict[str, Any]:
+    return {"name": name, "ok": bool(ok), "message": message, "severity": severity}
+
+
+def _check_python_version() -> dict[str, Any]:
+    info = sys.version_info
+    version_str = f"{info.major}.{info.minor}.{info.micro}"
+    ok = info >= (3, 9)
+    severity = "info" if ok else "error"
+    msg = f"Python {version_str}" + ("" if ok else " (要求 >=3.9)")
+    return _doctor_check("python_version", ok, msg, severity)
+
+
+def _check_store_writable(root: Path) -> dict[str, Any]:
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        probe = root / ".doctor-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return _doctor_check("store_writable", True, str(root), "info")
+    except OSError as exc:
+        return _doctor_check("store_writable", False, f"{root}: {exc}", "error")
+
+
+def _check_sqlite_fts5() -> dict[str, Any]:
+    try:
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute("CREATE VIRTUAL TABLE t USING fts5(text)")
+            con.execute("INSERT INTO t(text) VALUES ('hello')")
+            row = con.execute("SELECT text FROM t WHERE t MATCH 'hello'").fetchone()
+            ok = row is not None and row[0] == "hello"
+        finally:
+            con.close()
+        return _doctor_check(
+            "sqlite_fts5",
+            ok,
+            "SQLite FTS5 available" if ok else "SQLite FTS5 not available",
+            "info" if ok else "error",
+        )
+    except sqlite3.Error as exc:
+        return _doctor_check("sqlite_fts5", False, f"sqlite error: {exc}", "error")
+
+
+def _check_flask_installed() -> dict[str, Any]:
+    try:
+        import flask  # noqa: F401
+
+        return _doctor_check("flask_installed", True, f"flask {flask.__version__}", "info")
+    except ImportError as exc:
+        return _doctor_check("flask_installed", False, f"flask not installed: {exc}", "warn")
+
+
+def _check_claude_cli() -> dict[str, Any]:
+    found = shutil.which("claude")
+    if found:
+        return _doctor_check("claude_cli", True, found, "info")
+    return _doctor_check(
+        "claude_cli",
+        False,
+        "claude CLI not found in PATH (predict --llm will fall back to template)",
+        "warn",
+    )
+
+
+def _check_embedding_env() -> dict[str, Any]:
+    base_url = os.environ.get("NOVEL_READER_EMBED_BASE_URL", "").strip()
+    if base_url:
+        return _doctor_check(
+            "embedding_env",
+            True,
+            f"NOVEL_READER_EMBED_BASE_URL={base_url}",
+            "info",
+        )
+    return _doctor_check(
+        "embedding_env",
+        False,
+        "NOVEL_READER_EMBED_BASE_URL not set (semantic search will auto-discover local Qwen or fall back)",
+        "warn",
+    )
+
+
+def _check_embedding_health() -> dict[str, Any]:
+    try:
+        health = discover_local_qwen_embedding()
+        if health:
+            return _doctor_check(
+                "embedding_health",
+                True,
+                f"local embedding at 127.0.0.1:{health.get('port', '?')} model={health.get('model', '?')}",
+                "info",
+            )
+        return _doctor_check(
+            "embedding_health",
+            False,
+            "no local Qwen embedding detected on 8081-8085",
+            "warn",
+        )
+    except Exception as exc:  # noqa: BLE001 - doctor must never crash
+        return _doctor_check("embedding_health", False, f"probe failed: {exc}", "warn")
+
+
+def _check_vector_backend() -> dict[str, Any]:
+    return _doctor_check(
+        "vector_backend",
+        True,
+        "sqlite_cosine (local Python cosine over SQLite-stored vectors)",
+        "info",
+    )
+
+
+def _check_embedding_dependencies() -> dict[str, Any]:
+    """Check whether the optional embedding extras are importable."""
+    missing: list[str] = []
+    for mod in ("fastapi", "uvicorn", "sentence_transformers", "torch"):
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(mod)
+    if not missing:
+        return _doctor_check(
+            "embedding_dependencies",
+            True,
+            "all embedding extras (fastapi/uvicorn/sentence-transformers/torch) importable",
+            "info",
+        )
+    return _doctor_check(
+        "embedding_dependencies",
+        False,
+        f"missing: {', '.join(missing)}. Install with: pip install -e .[embedding]",
+        "warn",
+    )
+
+
+def run_doctor(root: Path) -> dict[str, Any]:
+    """Run all doctor checks. Never raises."""
+    checks: list[dict[str, Any]] = [
+        _check_python_version(),
+        _check_store_writable(root),
+        _check_sqlite_fts5(),
+        _check_flask_installed(),
+        _check_claude_cli(),
+        _check_embedding_env(),
+        _check_embedding_health(),
+        _check_vector_backend(),
+        _check_embedding_dependencies(),
+    ]
+    overall_ok = not any(c["severity"] == "error" and not c["ok"] for c in checks)
+    return {"ok": overall_ok, "checks": checks}
+
+
+def command_doctor(args: argparse.Namespace) -> int:
+    root = storage_root(args)
+    report = run_doctor(root)
+    if args.json:
+        print_json(report)
+    else:
+        print(f"novel-reader doctor — {report['checks'].__len__()} checks")
+        for c in report["checks"]:
+            mark = "OK " if c["ok"] else "FAIL"
+            sev = c["severity"].upper()
+            print(f"  [{mark}][{sev}] {c['name']}: {c['message']}")
+        print(f"\noverall: {'OK' if report['ok'] else 'ISSUES'}")
+    return 0 if report["ok"] else 0  # doctor never exits non-zero; warnings are not failures
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="novel-reader",
@@ -2446,6 +2582,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, help="调试用：只处理前 N 个块。")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=command_embed)
+
+    p = sub.add_parser("doctor", help="健康检查：Python / SQLite FTS5 / Flask / claude CLI / embedding 依赖。")
+    p.add_argument("--json", action="store_true", help="输出 JSON 格式。")
+    p.set_defaults(func=command_doctor)
 
     return parser
 

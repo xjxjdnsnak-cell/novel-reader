@@ -13,6 +13,17 @@ python ./bin/novel-reader do <book_id> "user request" --json
 
 Use lower-level commands only when `do` returns `unknown`, fails, or the user explicitly asks for a specific command.
 
+## Capability Boundary / 能力边界
+
+Novel Reader is the **evidence layer and reading-governance layer**. The agent (you, Claude / OpenCode) is the analyst.
+
+- `outline / map / analyze` produce **skeleton + evidence packets**, NOT finished analyses. Treat their output as input for you to interpret and complete, not as the final conclusion.
+- `style` produces scene-keyword counts and basic statistics (sentence-length / paragraph-length / dialogue-ratio) as **style evidence**, NOT a complete writing-style model.
+- `predict` produces a prediction analysis packet (template + evidence) by default. `predict --llm` calls the local `claude` CLI for deeper structured predictions. It is probabilistic analysis, NOT author-confirmed future content and NOT prose continuation.
+- Semantic search (when enabled) uses local Python cosine similarity over SQLite-stored vectors (`vector_backend: sqlite_cosine`). It is intentionally simple, not a production vector database.
+
+Do not present `outline / map / analyze / style / predict` output as the agent's final conclusion. Always re-read the evidence and form the final answer yourself.
+
 ## Core Rules
 
 - Default to Chinese output unless the user asks otherwise.
@@ -21,7 +32,7 @@ Use lower-level commands only when `do` returns `unknown`, fails, or the user ex
 - For future-plot questions such as "猜后续剧情", "预测发展", "结局可能", "伏笔会怎么回收", or "会不会黑化/背叛/死亡", use `predict`, not `continue`.
 - Prediction output must include probability, evidence, counter-evidence or uncertainty, and must not claim to know the author's real future plot.
 - Continuation prose must start from `write-next` or a continuation package; do not continue from memory alone.
-- Style distillation must produce original-writing guidance, not direct imitation prompts for a specific author.
+- `style` output is style **evidence** (keyword counts + basic stats). Treat it as input for your own style analysis, not as a complete style model and not as a direct imitation prompt for a specific author.
 - Do not upload novel text. Local Qwen embedding is preferred when semantic search is needed.
 
 ## Governed Full Reading
@@ -50,6 +61,8 @@ python ./bin/novel-reader finalize-reading <session_id> --json
 returns `full_scope_allowed=true`. The old `final_reports_allowed` field is deprecated and should be treated as a compatibility alias for `full_scope_allowed`.
 
 Do not generate `--scope full` outline/map/analyze/style/continue output before finalize succeeds. If the user forces skipping, use `--scope partial` and clearly label the answer as partial-scope.
+
+**Full-scope conclusions must depend on a finalized reading session.** Do not produce full-book conclusions from a partial or unfinalized session, even if the user pressures you.
 
 ## Reading Depth
 
@@ -87,7 +100,7 @@ python ./bin/novel-reader continue <book_id> --after-chapter N --scope full --js
 
 ## Answer Shape
 
-For plot Q&A and analysis, include direct answer, evidence list, uncertainty note, and next reads/searches when needed.
+For plot Q&A and analysis, include direct answer, evidence list, uncertainty note, and next reads/searches when needed. Important judgments must cite chunk evidence from Novel Reader; do not answer from memory alone.
 
 For prediction, output a prediction package or summary with probabilities, source evidence, risk, watchlist, and a disclaimer that this is not author-confirmed future content.
 

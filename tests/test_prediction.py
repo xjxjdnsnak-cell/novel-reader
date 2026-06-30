@@ -174,6 +174,90 @@ def test_predict_llm_falls_back_when_claude_unavailable(tmp_path: Path, monkeypa
     assert any("claude CLI" in item for item in packet["warnings"])
 
 
+def test_predict_llm_packet_keeps_prompt_md_for_audit(tmp_path: Path, monkeypatch):
+    """use_llm=True 时 packet 必须保留 prompt_md，便于审计实际发给 Claude 的 prompt。"""
+    store, book = import_book(tmp_path)
+    monkeypatch.setattr(predictor.shutil, "which", lambda name: None)
+    args = SimpleNamespace(
+        question="后续剧情可能怎么发展？",
+        scope="general",
+        horizon="next-arc",
+        anchor_chapter=None,
+        anchor_chunk=None,
+        context_chunks=5,
+        top=8,
+        semantic=False,
+    )
+
+    packet = predictor.build_prediction_packet(store, book, args, use_llm=True)
+
+    assert packet["prompt_md"]
+    assert "小说预测分析请求" in packet["prompt_md"]
+    assert any("claude CLI" in item for item in packet["warnings"])
+
+
+def test_predict_llm_write_creates_prompt_files_even_on_fallback(tmp_path: Path, monkeypatch):
+    """claude 不可用 fallback 时，--write 也必须写入 prompt 文件。"""
+    store, book = import_book(tmp_path)
+    monkeypatch.setattr(predictor.shutil, "which", lambda name: None)
+    args = SimpleNamespace(
+        question="后续剧情可能怎么发展？",
+        scope="general",
+        horizon="next-arc",
+        anchor_chapter=None,
+        anchor_chunk=None,
+        context_chunks=5,
+        top=8,
+        semantic=False,
+    )
+    packet = predictor.build_prediction_packet(store, book, args, use_llm=True)
+    paths = predictor.write_prediction_packet(store, book, packet)
+
+    path_objs = [Path(p) for p in paths]
+    assert store / book / "predictions" / "prediction-prompt-latest.md" in path_objs
+    prompt_files = [p for p in path_objs if p.name.endswith("-prediction-prompt.md")]
+    assert prompt_files, "timestamped prompt file must be written"
+    for path in path_objs:
+        assert path.exists()
+    prompt_content = (store / book / "predictions" / "prediction-prompt-latest.md").read_text(encoding="utf-8")
+    assert "小说预测分析请求" in prompt_content
+
+
+def test_predict_llm_write_creates_prompt_files_on_success(tmp_path: Path, monkeypatch):
+    """claude 可用且返回有效 JSON 时，--write 也必须写入 prompt 文件。"""
+    store, book = import_book(tmp_path)
+    llm_payload = {
+        "result": json.dumps(
+            {"predictions": [], "alternative_scenarios": [], "watchlist": []},
+            ensure_ascii=False,
+        )
+    }
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps(llm_payload, ensure_ascii=False), stderr="")
+
+    monkeypatch.setattr(predictor.shutil, "which", lambda name: "claude")
+    monkeypatch.setattr(predictor.subprocess, "run", fake_run)
+    args = SimpleNamespace(
+        question="后续剧情可能怎么发展？",
+        scope="general",
+        horizon="next-arc",
+        anchor_chapter=None,
+        anchor_chunk=None,
+        context_chunks=5,
+        top=8,
+        semantic=False,
+    )
+
+    packet = predictor.build_prediction_packet(store, book, args, use_llm=True)
+    paths = predictor.write_prediction_packet(store, book, packet)
+
+    assert any(Path(p).name == "prediction-prompt-latest.md" for p in paths)
+    prompt_latest = store / book / "predictions" / "prediction-prompt-latest.md"
+    assert prompt_latest.exists()
+    assert "小说预测分析请求" in prompt_latest.read_text(encoding="utf-8")
+
+
 def test_predict_llm_parses_claude_json_predictions(tmp_path: Path, monkeypatch):
     store, book = import_book(tmp_path)
     llm_payload = {
@@ -294,7 +378,19 @@ def test_predict_semantic_warns_that_prediction_uses_local_heuristics(tmp_path: 
     data = load_json(run_cli(store, "predict", book, "后续剧情可能怎么发展？", "--semantic", "--json"))
 
     assert data["prediction_goal"]["semantic"] is True
-    assert any("semantic requested but predict currently uses local heuristic scoring" in item for item in data["warnings"])
+    assert data["prediction_goal"]["semantic_requested"] is True
+    assert data["prediction_goal"]["semantic_applied"] is False
+    assert any("semantic" in item and "local heuristic" in item for item in data["warnings"])
+
+
+def test_predict_without_semantic_reports_applied_false(tmp_path: Path):
+    store, book = import_book(tmp_path)
+
+    data = load_json(run_cli(store, "predict", book, "后续剧情可能怎么发展？", "--json"))
+
+    assert data["prediction_goal"]["semantic"] is False
+    assert data["prediction_goal"]["semantic_requested"] is False
+    assert data["prediction_goal"]["semantic_applied"] is False
 
 
 def test_web_predict_api_partial_and_full_scope_guard(tmp_path: Path, monkeypatch):

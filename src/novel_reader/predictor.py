@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .storage import book_dir, fetch_chunks, load_manifest, open_db
+
 
 PREDICTION_SCHEMA_VERSION = "1.1"
 
@@ -25,31 +27,6 @@ THREAD_TERMS = {
     "setting": ("规则", "境界", "宗门", "势力", "传承", "血脉", "bloodline", "heirloom", "ancient", "map"),
     "conflict": ("冲突", "死亡", "离散", "败落", "围攻", "突破", "enemy", "conflict", "attack", "battle", "siege", "breakthrough"),
 }
-
-
-def book_dir(root: Path, book_id: str) -> Path:
-    return root / book_id
-
-
-def load_manifest(root: Path, book_id: str) -> dict[str, Any]:
-    path = book_dir(root, book_id) / "manifest.json"
-    if not path.exists():
-        raise ValueError(f"Book not found: {book_id}")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def open_db(root: Path, book_id: str) -> sqlite3.Connection:
-    con = sqlite3.connect(book_dir(root, book_id) / "index.sqlite")
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def fetch_chunks(root: Path, book_id: str) -> list[dict[str, Any]]:
-    con = open_db(root, book_id)
-    try:
-        return [dict(row) for row in con.execute("SELECT * FROM chunks ORDER BY chapter_index, chunk_index")]
-    finally:
-        con.close()
 
 
 def fetch_summaries(root: Path, book_id: str) -> dict[int, str]:
@@ -677,8 +654,13 @@ def build_prediction_packet(root: Path, book: str, args: Any, use_llm: bool = Fa
     insufficient = len(evidence) < 3 or coverage < 20
     character_states = infer_character_states(evidence)
     warnings = ["这是基于现有文本的推测，不是作者真实后续。"]
-    if bool(getattr(args, "semantic", False)):
-        warnings.append("semantic requested but predict currently uses local heuristic scoring; semantic evidence retrieval is not applied in predict yet.")
+    semantic_requested = bool(getattr(args, "semantic", False))
+    semantic_applied = False
+    if semantic_requested:
+        warnings.append(
+            "semantic requested but predict currently uses local heuristic scoring; "
+            "semantic_applied=false (predict 当前仍使用本地启发式证据排序，semantic 只记录请求状态，未参与预测排序)."
+        )
     if insufficient:
         warnings.append("摘要覆盖或证据数量不足，预测可靠性会下降。")
 
@@ -737,7 +719,9 @@ def build_prediction_packet(root: Path, book: str, args: Any, use_llm: bool = Fa
             "horizon": horizon,
             "anchor_chapter": anchor_chapter,
             "anchor_chunk": anchor_chunk,
-            "semantic": bool(getattr(args, "semantic", False)),
+            "semantic": semantic_requested,
+            "semantic_requested": semantic_requested,
+            "semantic_applied": semantic_applied,
             "use_llm": use_llm,
         },
         "current_state": {
@@ -764,8 +748,9 @@ def build_prediction_packet(root: Path, book: str, args: Any, use_llm: bool = Fa
         "missing_reading_suggestions": ["提高 summary coverage，或先完成 balanced reading session。"] if insufficient else [],
         "recommended_next_reads": [item["chapter"] for item in context[-3:]],
         "warnings": warnings,
-        # Fields for LLM-prompt mode
-        "prompt_md": prompt_md if not use_llm else None,
+        # Always retain prompt_md so users can audit what is/was sent to Claude,
+        # whether the LLM mode succeeded, fell back, or wasn't requested at all.
+        "prompt_md": prompt_md,
         "prompt_path": prompt_path,
         "llm_response": llm_response,
     }
