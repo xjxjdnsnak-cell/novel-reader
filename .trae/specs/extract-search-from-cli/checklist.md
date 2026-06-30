@@ -1,0 +1,16 @@
+- [x] `src/novel_reader/search.py` 已创建，承载 15 个函数：split_terms、snippet、like_search、fts_query、fts_search、cosine、local_config_path、read_local_launcher_config、local_qwen_embedding_health、local_qwen_embedding_available、discover_local_qwen_embedding、resolve_embedding_config、embed_texts、semantic_search、search_book
+- [x] `search.py` 不在顶部 import NovelReaderError（改为 embed_texts 内 lazy import），独立 `from novel_reader import search` 不触发循环导入 ✅
+- [x] `search.py` 从 `.storage` 导入 `open_db`、`load_manifest`，不重复定义
+- [x] `search.py` 中 `local_config_path` 的 `Path(__file__).resolve().parents[2]` 仍解析到项目根目录（search.py 与 cli.py 同目录）
+- [x] 15 个函数的函数体、签名、docstring、错误消息、返回结构逐字一致（纯搬迁，零行为变更）
+- [x] `cli.py` 在 storage re-export 之后新增 `from .search import (...)`，15 个名字 re-export 回 cli 命名空间
+- [x] `cli.py` 中原 lines 522-822 的 15 个原始函数定义已删除（grep `def split_terms|def search_book|def embed_texts` 在 cli.py 无匹配）
+- [x] `cli.py` 内部调用点（command_search、command_ask、build_continuation_packet、command_embed、_check_vector_backend）未改动，仍用裸名调用
+- [x] `web_app.py` 未改动（`cli.search_book` line 115 / `cli.get_chunks` line 107 / `cli.fetch_summary_rows` line 66 经 re-export 透传）
+- [x] `tests/` 未改动（grep 确认无测试直接 import 这 15 个函数）
+- [x] `python -c "from novel_reader import search"` 无循环导入错误 ✅
+- [x] `python -m pytest -q` 全套通过：**82 passed** ✅
+- [x] 端到端冒烟：ingest ✅ → search --json（8 results, fts+like）✅ → ask --json（8 evidence）✅ → doctor（9 checks, ok=True）✅ → web `/api/status/smoke-book` 200 ✅ → web `/api/search` 200（5 results）✅
+- [x] `wc -l src/novel_reader/cli.py` = **2342 行**（原 2625，减重 283 行）
+- [x] 未拆 embedding 为独立文件（search_book 与 semantic_search 强耦合，本轮明确不做）
+- [x] 未动 command_* 函数体、dispatch_command、web_app 逻辑、前端

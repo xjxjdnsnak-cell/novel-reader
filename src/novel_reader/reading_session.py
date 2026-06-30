@@ -9,6 +9,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .storage import (
+    StorageError,
+    book_dir,
+    fetch_chapters,
+    fetch_chunks,
+    load_manifest,
+)
+
 
 LEVEL_NONE = "NONE"
 LEVEL_L1 = "L1_SKIMMED"
@@ -27,10 +35,6 @@ GOALS = {"full"}
 
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
-
-
-def book_dir(root: Path, book_id: str) -> Path:
-    return root / book_id
 
 
 def reading_db_path(root: Path) -> Path:
@@ -83,29 +87,6 @@ def init_reading_db(con: sqlite3.Connection) -> None:
         """
     )
     con.commit()
-
-
-def load_manifest(root: Path, book_id: str) -> dict[str, Any]:
-    path = book_dir(root, book_id) / "manifest.json"
-    if not path.exists():
-        raise ValueError(f"Book index not found: {book_id}. Run novel-reader ingest first.")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def fetch_chapters(root: Path, book_id: str) -> list[dict[str, Any]]:
-    path = book_dir(root, book_id) / "chapters.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-
-def fetch_chunks(root: Path, book_id: str) -> list[dict[str, Any]]:
-    con = sqlite3.connect(book_dir(root, book_id) / "index.sqlite")
-    con.row_factory = sqlite3.Row
-    try:
-        return [dict(row) for row in con.execute("SELECT * FROM chunks ORDER BY chapter_index, chunk_index")]
-    finally:
-        con.close()
 
 
 def group_chunks_by_chapter(chunks: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:

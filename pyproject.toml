@@ -7,6 +7,23 @@ dependencies = [
     "flask>=3.0",
 ]
 
+# Optional dependencies for the local Qwen embedding service (qwen_embed_server.py).
+# These are heavy (torch etc.) and intentionally NOT in the default dependencies.
+# Install with:  pip install -e .[embedding]
+[project.optional-dependencies]
+embedding = [
+    "fastapi",
+    "uvicorn",
+    "sentence-transformers",
+    "torch",
+]
+# llama-cpp-python is split out because it often needs platform-specific build
+# flags and can be painful to install. Install separately with:
+#   pip install -e .[llama]
+llama = [
+    "llama-cpp-python",
+]
+
 [project.scripts]
 novel-reader = "novel_reader.cli:main"
 novel-reader-web = "novel_reader.web_app:main"

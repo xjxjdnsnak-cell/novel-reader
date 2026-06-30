@@ -2,6 +2,26 @@
 
 Novel Reader is a Claude Code + OpenCode compatible toolkit for reading long TXT/Markdown novels with a local chapter/chunk index, source-grounded evidence, optional semantic search, style analysis, continuation packages, and governed full-reading sessions.
 
+## Capability Boundary / 能力边界
+
+Please read this before expecting the toolkit to "analyze novels on its own".
+
+What Novel Reader actually does locally:
+
+- Local index of TXT/Markdown novels into chapters and chunks.
+- Source-grounded evidence packets (chapter / chunk / line citations).
+- Governed full-reading sessions (L1/L2/L3 coverage + finalize gate) that force an agent to actually read the book before issuing full-scope conclusions.
+- Continuation / prediction / outline / map / analyze / style **task packages** that collect evidence and assemble skeletons, prompts, and statistics.
+
+What Novel Reader does NOT do on its own:
+
+- It is not a complete automatic literary analysis engine. `outline / map / analyze` produce **skeleton + evidence packets**, not finished analyses. Final literary judgment, deep interpretation, and original prose must be produced by Claude / OpenCode based on these evidence packets.
+- `style` outputs scene-keyword counts, sentence-length / paragraph-length / dialogue-ratio statistics as **style evidence**, not a complete writing-style model.
+- `predict` is template + evidence based by default. `predict --llm` calls the local `claude` CLI for deeper structured predictions, but it is still probabilistic analysis, not author-confirmed future content.
+- Semantic search (when enabled) uses local Python cosine similarity over SQLite-stored vectors (`vector_backend: sqlite_cosine`). It is not a production vector database.
+
+In short: **Novel Reader is the evidence layer and reading-governance layer. The agent is the analyst.** Treat any `outline / map / analyze / style / predict` output as input for the agent, not as the final conclusion.
+
 ## Quick Start
 
 Normal users only need import plus the natural-language entrypoint:
@@ -134,20 +154,32 @@ read <book> --chunk c0001-001         Read one chunk
 search <book> "<query>"               Search source text
 ask <book> "<question>"               Build a plot Q&A evidence packet
 note <book> --chapter N               Store a legacy chapter summary
-outline <book> --scope partial|full   Generate plot outline
-map <book> --scope partial|full       Generate book map
-analyze <book> --scope partial|full   Generate writing analysis
-style <book> --scope partial|full     Distill language style evidence
-predict <book> [question]             Predict future plot directions with evidence, probability, and uncertainty
+outline <book> --scope partial|full   Generate plot outline skeleton + evidence
+map <book> --scope partial|full       Generate book map skeleton + evidence
+analyze <book> --scope partial|full   Generate writing analysis skeleton + evidence
+style <book> --scope partial|full     Build style evidence (scene-keyword counts + stats)
+predict <book> [question]             Build prediction analysis packet (template + evidence; --llm for deeper)
 continue <book> --after-chapter N     Build a continuation package
 embed <book>                          Optional semantic index
 ```
 
-`predict` is local and template/evidence based by default. `predict --llm` is an explicit optional enhancement that calls the local `claude` CLI through subprocess and asks it to turn the prediction prompt into structured JSON. It still outputs a prediction analysis package, not prose continuation, and it must not be treated as author-confirmed future content.
+`outline / map / analyze` produce **skeleton + evidence packets**, not finished analyses. `style` produces scene-keyword counts and basic statistics as **style evidence**, not a complete style model. `predict` is template + evidence based by default; `predict --llm` is an explicit optional enhancement that calls the local `claude` CLI through subprocess and asks it to turn the prediction prompt into structured JSON. None of these is author truth, and none is a complete automatic analysis engine — they are inputs for Claude / OpenCode to work from.
 
 ## Semantic Search
 
 Keyword search and SQLite FTS work locally by default.
+
+The local Qwen embedding service (`qwen_embed_server.py`) requires optional heavy dependencies (torch, fastapi, etc.). Install them explicitly; they are NOT pulled in by the default install:
+
+```bash
+pip install -e .[embedding]
+```
+
+If you want to use a GGUF model via `llama-cpp-python` (often needs platform-specific build flags), install it separately:
+
+```bash
+pip install -e .[llama]
+```
 
 Current semantic search is deliberately simple:
 
@@ -191,5 +223,5 @@ TODO backend options:
 - Future-plot prediction uses `predict`; it is probabilistic analysis, not author truth and not prose continuation.
 - `predict --llm` may send the generated prediction prompt and evidence excerpts to the local Claude Code CLI. Do not use it when you want strictly local/offline heuristic prediction.
 - Continuation writing should start from `continue` or `write-next`; the CLI does not call an external writing model.
-- Style distillation outputs transferable original-writing guidance, not direct imitation prompts.
+- Style outputs scene-keyword counts and basic statistics as **style evidence** for the agent, not a complete writing-style model and not a direct imitation prompt.
 - Do not commit `.novel-reader/`, `.novel-reader-local/`, model paths, API keys, or novel text.
