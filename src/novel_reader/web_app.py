@@ -23,6 +23,25 @@ DOCUMENT_EXTS = {".md", ".json", ".txt"}
 CLAUDE_TIMEOUT_SECONDS = 240
 MAX_CLAUDE_CONTEXT_CHARS = 80000
 MAX_CLAUDE_MESSAGE_CHARS = 20000
+ALLOWED_HOST_NAMES = {"127.0.0.1", "localhost"}
+
+
+def host_header_allowed(host_header: str) -> bool:
+    """True if the ``Host`` header points at the local machine.
+
+    The web console only ever serves the local user, so any other hostname
+    (e.g. an attacker domain replayed via DNS rebinding) is rejected. Port and
+    IPv6 brackets are stripped before comparison.
+    """
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):
+        host = host[1:]
+        end = host.find("]")
+        if end >= 0:
+            host = host[:end]
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return host in ALLOWED_HOST_NAMES
 
 
 def make_app() -> Flask:
@@ -30,10 +49,20 @@ def make_app() -> Flask:
     app.config["NOVEL_READER_CSRF_TOKEN"] = os.environ.get("NOVEL_READER_WEB_TOKEN") or secrets.token_urlsafe(32)
 
     @app.before_request
+    def check_host() -> Any:
+        # Audit S-2: DNS rebinding makes an attacker page same-origin; the
+        # Host header is the one thing rebinding cannot forge.
+        if not host_header_allowed(request.host):
+            return jsonify({"ok": False, "error": "Host header is not allowed."}), 403
+        return None
+
+    @app.before_request
     def check_csrf() -> Any:
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             token = request.headers.get("X-Novel-Reader-Token", "")
-            if token != app.config["NOVEL_READER_CSRF_TOKEN"]:
+            if not secrets.compare_digest(
+                token.encode("utf-8"), str(app.config["NOVEL_READER_CSRF_TOKEN"]).encode("utf-8")
+            ):
                 return jsonify({"ok": False, "error": "CSRF token missing or invalid."}), 403
         return None
 

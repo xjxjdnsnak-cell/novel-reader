@@ -203,6 +203,17 @@ def resolve_embedding_config(model: str | None = None) -> tuple[str, str, str]:
         resolved_model = resolved_model or local_health.get("model") or "qwen3-embedding-0.6b"
 
     if not base_url:
+        if api_key:
+            # Audit S-4: never send novel text to a remote endpoint implicitly.
+            # If an API key exists but no explicit base_url was configured,
+            # refuse instead of defaulting to https://api.openai.com/v1.
+            from .cli import NovelReaderError
+
+            raise NovelReaderError(
+                "检测到 NOVEL_READER_EMBED_API_KEY，但未配置 NOVEL_READER_EMBED_BASE_URL。"
+                "为避免把小说文本发送到远程服务，请显式设置 NOVEL_READER_EMBED_BASE_URL"
+                "（例如本地 Qwen 服务 http://127.0.0.1:8081/v1）后再运行 embedding。"
+            )
         base_url = "https://api.openai.com/v1"
     if not resolved_model:
         resolved_model = "text-embedding-3-small"

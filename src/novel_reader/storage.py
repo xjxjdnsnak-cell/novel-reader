@@ -14,9 +14,10 @@ Design notes:
 - ``storage_root(store=None)`` is a pure function. ``cli.storage_root(args)``
   remains a thin wrapper so that existing ``command_*`` call sites do not
   need to change.
-- ``book_dir`` follows the ``cli.py`` semantics: if ``book_id`` happens to be
-  an existing directory path, use it directly. This is the most permissive of
-  the three previous implementations and preserves backward compatibility.
+- ``book_dir`` maps a validated plain book id to ``root / book_id``. The old
+  "if ``book_id`` happens to be an existing directory, use it as a path"
+  fallback was removed (audit S-1): it let ``--book-id ..`` or any existing
+  directory escape the storage root and be deleted by ``ingest --force``.
 """
 
 from __future__ import annotations
@@ -50,15 +51,24 @@ def storage_root(store: str | os.PathLike[str] | None = None) -> Path:
 
 
 def book_dir(root: Path, book_id: str) -> Path:
-    """Return the directory for a given book_id.
+    """Return the directory for a given book_id under ``root``.
 
-    If ``book_id`` itself is an existing directory (e.g. a relative path was
-    passed in), use it directly. Otherwise treat it as an id under ``root``.
+    ``book_id`` must be a plain identifier. Empty values, absolute paths,
+    path separators (``/`` or ``\\``), and ``..`` (or ``.``) components are
+    rejected with ``StorageError`` so a book directory can never resolve
+    outside ``root`` (audit S-1).
     """
-    candidate = Path(book_id)
-    if candidate.exists() and candidate.is_dir():
-        return candidate.resolve()
-    return root / book_id
+    bid = str(book_id) if book_id is not None else ""
+    if not bid.strip():
+        raise StorageError("book_id 不能为空。")
+    candidate = Path(bid)
+    if candidate.is_absolute() or candidate.drive or candidate.root:
+        raise StorageError(f"book_id 不能是绝对路径：{book_id}")
+    if "/" in bid or "\\" in bid or bid in {".", ".."} or ".." in candidate.parts:
+        raise StorageError(
+            f"book_id 不能包含路径分隔符或 .. 组件：{book_id}。请使用纯 id（如 my-book）。"
+        )
+    return root / bid
 
 
 def manifest_path(root: Path, book_id: str) -> Path:

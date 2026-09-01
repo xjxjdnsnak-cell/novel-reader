@@ -338,6 +338,21 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def is_managed_index_dir(root: Path, target: Path) -> bool:
+    """True only if ``target`` is inside the storage root AND is a novel-reader
+    index directory (contains ``manifest.json``).
+
+    Used as a safety gate before ``shutil.rmtree`` in ``ingest --force``
+    (audit S-1): a directory that is not this tool's own index must never be
+    recursively deleted.
+    """
+    try:
+        target.resolve().relative_to(Path(root).resolve())
+    except (ValueError, OSError):
+        return False
+    return (target / "manifest.json").is_file()
+
+
 def command_ingest(args: argparse.Namespace) -> int:
     source = Path(args.file).expanduser().resolve()
     if not source.exists():
@@ -355,7 +370,13 @@ def command_ingest(args: argparse.Namespace) -> int:
     if target.exists() and not args.force:
         raise NovelReaderError(f"索引已存在：{book_id}。如需重建，加 --force。")
     if target.exists() and args.force:
-        shutil.rmtree(target)
+        if not is_managed_index_dir(root, target):
+            print(
+                f"警告：{target} 不在存储根内或缺少 manifest.json，不是 novel-reader 索引目录，跳过删除。",
+                file=sys.stderr,
+            )
+        else:
+            shutil.rmtree(target)
 
     for subdir in ("summaries", "maps", "reports", "styles", "continuations"):
         (target / subdir).mkdir(parents=True, exist_ok=True)
