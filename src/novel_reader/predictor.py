@@ -121,17 +121,54 @@ def score_terms(text: str, terms: tuple[str, ...] | list[str]) -> int:
     return sum(lowered.count(term.lower()) for term in terms) + sum(text.count(term) for term in terms)
 
 
+REASON_LABELS = {
+    "foreshadowing": "伏笔/线索",
+    "character": "人物动机",
+    "setting": "设定规则",
+    "conflict": "冲突升级",
+}
+
+
 def reason_from_text(text: str, question: str | None = None) -> str:
     scores = {category: score_terms(text, terms) for category, terms in THREAD_TERMS.items()}
     category = max(scores, key=scores.get)
     if scores[category] <= 0:
         return "问题相关" if question else "最近剧情状态"
-    return {
-        "foreshadowing": "伏笔/线索",
-        "character": "人物动机",
-        "setting": "设定规则",
-        "conflict": "冲突升级",
-    }[category]
+    return REASON_LABELS[category]
+
+
+def score_and_reason(text: str, terms: list[str], question: str | None) -> tuple[float, str, str]:
+    """Score ``text`` once for both ranking and the reason label (audit P-5).
+
+    Returns ``(score, reason, category)`` where the values are exactly those
+    that the previous three-step computation produced:
+
+    * ``score`` starts as ``score_terms(text, terms)`` and then accumulates
+      ``score_terms(text, category_terms) * 1.5`` for each THREAD_TERMS
+      category, in declaration order;
+    * ``reason``/``category`` are what ``reason_from_text(text, question)``
+      returned.
+
+    The lowered copy of the text and the per-category counts are computed a
+    single time and reused instead of being recomputed by separate
+    ``score_terms``/``reason_from_text`` calls (~2x fewer full-text scans per
+    chunk, and no repeated ``str.lower()`` copies).
+    """
+    lowered = text.lower()
+    score: float = sum(lowered.count(term.lower()) for term in terms) + sum(text.count(term) for term in terms)
+    category_scores: dict[str, int] = {}
+    for category, category_terms in THREAD_TERMS.items():
+        category_score = sum(lowered.count(term.lower()) for term in category_terms) + sum(
+            text.count(term) for term in category_terms
+        )
+        category_scores[category] = category_score
+        score += category_score * 1.5
+    category = max(category_scores, key=category_scores.get)
+    if category_scores[category] <= 0:
+        reason = "问题相关" if question else "最近剧情状态"
+    else:
+        reason = REASON_LABELS[category]
+    return score, reason, category
 
 
 def format_evidence_chunk(chunk: dict[str, Any], reason: str | None = None, max_chars: int = 300) -> dict[str, Any]:
@@ -189,12 +226,14 @@ def collect_evidence(
 ) -> list[dict[str, Any]]:
     terms = query_terms(question, scope, horizon)
     scored = []
+    # Reason labels come from the same single pass as the scores (audit P-5);
+    # previously they were computed twice per chunk by reason_from_text.
+    # Keyed by object identity so duplicate chunk_ids can never cross-wire
+    # reasons between different chunk texts.
+    reasons: dict[int, str] = {}
     for index, chunk in enumerate(chunks):
-        text = chunk["text"]
-        score = score_terms(text, terms)
-        reason = reason_from_text(text, question)
-        for category_terms in THREAD_TERMS.values():
-            score += score_terms(text, category_terms) * 1.5
+        score, reason, _category = score_and_reason(chunk["text"], terms, question)
+        reasons[id(chunk)] = reason
         if chunk["chunk_id"] in context_ids:
             score += 2
         if score > 0:
@@ -202,7 +241,7 @@ def collect_evidence(
     if not scored:
         scored = [(1, index, chunk) for index, chunk in enumerate(chunks[-top:])]
     selected = select_distributed(scored, lambda item: int(item["chapter_index"]), top)
-    return [format_evidence_chunk(chunk, reason_from_text(chunk["text"], question)) for chunk in selected]
+    return [format_evidence_chunk(chunk, reasons[id(chunk)]) for chunk in selected]
 
 
 def extract_global_threads(summaries: dict[int, str], evidence: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:

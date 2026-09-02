@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from .intent_router import IntentResult, classify_request
 from .predictor import build_prediction_packet, render_prediction_packet, write_prediction_packet
@@ -101,12 +101,21 @@ def require_full_scope(root: Path, book_id: str, report_type: str, args: argpars
 
 def read_text_file(path: Path) -> tuple[str, str]:
     raw = path.read_bytes()
-    for encoding in ("utf-8-sig", "utf-8", "gb18030", "big5", "utf-16"):
+    text: str | None = None
+    encoding = "utf-8-replace"
+    for candidate in ("utf-8-sig", "utf-8", "gb18030", "big5", "utf-16"):
         try:
-            return raw.decode(encoding), encoding
+            text = raw.decode(candidate)
+            encoding = candidate
+            break
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8", errors="replace"), "utf-8-replace"
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    # Release the byte payload immediately: only the decoded string is needed
+    # from here on (audit P-6).
+    del raw
+    return text, encoding
 
 
 def sha256_file(path: Path) -> str:
@@ -231,22 +240,49 @@ def detect_chapter_title(line: str) -> str | None:
 
 
 def line_starts(text: str) -> list[int]:
+    # str.find scan instead of re.finditer: identical offsets, no per-match
+    # object allocations (audit P-6). Keeps the historical "\n only" semantics
+    # that line_start/line_end metadata has always used.
     starts = [0]
-    for match in re.finditer(r"\n", text):
-        starts.append(match.end())
-    return starts
+    pos = 0
+    find = text.find
+    while True:
+        pos = find("\n", pos)
+        if pos == -1:
+            return starts
+        pos += 1
+        starts.append(pos)
+
+
+# str.splitlines() separator set, so that iterating lines one at a time (see
+# iter_lines_with_endings) reproduces splitlines(keepends=True) exactly —
+# including \r\n, lone \r, \v, \f, \x1c-\x1e, NEL, and unicode line/paragraph
+# separators — without materializing the full list of line strings.
+_SPLITLINES_RE = re.compile(r"\r\n|[\n\v\f\r\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
+def iter_lines_with_endings(text: str) -> Iterator[str]:
+    """Yield the same line strings as ``text.splitlines(keepends=True)``, one
+    at a time (audit P-6): the full list would hold roughly one extra copy of
+    the whole book in memory."""
+    prev = 0
+    for match in _SPLITLINES_RE.finditer(text):
+        yield text[prev : match.end()]
+        prev = match.end()
+    if prev < len(text):
+        yield text[prev:]
 
 
 def offset_to_line(starts: list[int], offset: int) -> int:
     return bisect.bisect_right(starts, offset)
 
 
-def detect_chapters(text: str) -> list[dict[str, Any]]:
-    starts = line_starts(text)
-    lines = text.splitlines(keepends=True)
+def detect_chapters(text: str, starts: list[int] | None = None) -> list[dict[str, Any]]:
+    if starts is None:
+        starts = line_starts(text)
     headings: list[tuple[int, int, str]] = []
     cursor = 0
-    for line_no, line in enumerate(lines, start=1):
+    for line_no, line in enumerate(iter_lines_with_endings(text), start=1):
         title = detect_chapter_title(line)
         if title:
             headings.append((cursor, line_no, title))
@@ -382,10 +418,18 @@ def command_ingest(args: argparse.Namespace) -> int:
         (target / subdir).mkdir(parents=True, exist_ok=True)
 
     starts = line_starts(text)
-    chapters = detect_chapters(text)
+    total_chars = len(text)
+    chapters = detect_chapters(text, starts)
     chunks: list[dict[str, Any]] = []
     for chapter in chapters:
         chunks.extend(chunk_chapter(chapter, args.chunk_chars, args.overlap_chars, starts))
+        # The chapter's text slice is only needed for chunk extraction; drop
+        # the reference so chapter slices do not stay resident alongside the
+        # chunk copies (audit P-6).
+        chapter["text"] = ""
+    # The full decoded text is no longer needed: chunks carry their own
+    # slices and only total_chars feeds the manifest below (audit P-6).
+    del text
 
     con = sqlite3.connect(target / "index.sqlite")
     fts_enabled = init_db(con)
@@ -433,7 +477,7 @@ def command_ingest(args: argparse.Namespace) -> int:
         "source_size_bytes": source.stat().st_size,
         "source_encoding": encoding,
         "imported_at": now_iso(),
-        "total_chars": len(text),
+        "total_chars": total_chars,
         "chapter_count": len(chapters),
         "chunk_count": len(chunks),
         "chunk_chars": args.chunk_chars,
@@ -455,7 +499,7 @@ def command_ingest(args: argparse.Namespace) -> int:
         "title": title,
         "chapters": len(chapters),
         "chunks": len(chunks),
-        "chars": len(text),
+        "chars": total_chars,
         "store": str(target),
         "fts_enabled": fts_enabled,
     }
@@ -1742,6 +1786,16 @@ def command_embed(args: argparse.Namespace) -> int:
     con = open_db(root, args.book)
     try:
         rows = list(con.execute("SELECT chunk_id, text FROM chunks ORDER BY chapter_index, chunk_index"))
+        # Resume marker (audit P-7): chunks that already have an embedding row
+        # for the current (provider, model) pair are skipped, so re-running
+        # embed after an interruption continues where it stopped. Rows for
+        # other provider/model pairs are re-embedded via the ON CONFLICT
+        # upsert below.
+        already_embedded = {
+            row["chunk_id"]
+            for row in con.execute("SELECT chunk_id FROM embeddings WHERE provider = ? AND model = ?", (provider, model))
+        }
+        rows = [row for row in rows if row["chunk_id"] not in already_embedded]
         if args.limit:
             rows = rows[: args.limit]
         done = 0
@@ -1774,7 +1828,9 @@ def command_embed(args: argparse.Namespace) -> int:
         "enabled": True,
         "provider": provider,
         "model": model,
-        "chunk_count": done,
+        # Total coverage for this provider/model pair: rows that were already
+        # present before this run plus the ones embedded now.
+        "chunk_count": done + len(already_embedded),
         "updated_at": now_iso(),
     }
     save_manifest(root, manifest)
