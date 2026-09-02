@@ -1,5 +1,7 @@
 """Regression tests for the audit performance fixes (P-1, P-2, P-3)."""
 
+from __future__ import annotations
+
 import json
 import random
 import sqlite3
