@@ -127,16 +127,23 @@ def fetch_chapters(root: Path, book_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def fetch_chunks(root: Path, book_id: str) -> list[dict[str, Any]]:
-    """Return all chunks for a book, ordered by chapter then chunk index."""
+def fetch_chunks(root: Path, book_id: str, chapter: int | None = None) -> list[dict[str, Any]]:
+    """Return chunks for a book, ordered by chapter then chunk index.
+
+    With ``chapter`` given, only that chapter's chunks are loaded via a
+    parameterized ``WHERE chapter_index = ?`` query instead of pulling the
+    whole book into memory (audit P-1); reading sessions use this for their
+    per-chapter /next queries.
+    """
     con = open_db(root, book_id)
     try:
-        return [
-            dict(row)
-            for row in con.execute(
-                "SELECT * FROM chunks ORDER BY chapter_index, chunk_index"
-            )
-        ]
+        if chapter is None:
+            sql = "SELECT * FROM chunks ORDER BY chapter_index, chunk_index"
+            params: tuple[int, ...] = ()
+        else:
+            sql = "SELECT * FROM chunks WHERE chapter_index = ? ORDER BY chapter_index, chunk_index"
+            params = (int(chapter),)
+        return [dict(row) for row in con.execute(sql, params)]
     finally:
         con.close()
 

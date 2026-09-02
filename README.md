@@ -181,6 +181,8 @@ If you want to use a GGUF model via `llama-cpp-python` (often needs platform-spe
 pip install -e .[llama]
 ```
 
+Optional: `pip install -e .[speed]` installs numpy so semantic search ranks vectors with a single BLAS matrix multiply instead of the pure-Python fallback.
+
 Current semantic search is deliberately simple:
 
 - Embedding service generates vectors.

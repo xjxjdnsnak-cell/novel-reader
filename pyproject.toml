@@ -23,6 +23,12 @@ embedding = [
 llama = [
     "llama-cpp-python",
 ]
+# Optional: numpy enables BLAS-batched cosine similarity for semantic search;
+# without it the pure-Python per-row fallback is used. Install with:
+#   pip install -e .[speed]
+speed = [
+    "numpy",
+]
 
 [project.scripts]
 novel-reader = "novel_reader.cli:main"

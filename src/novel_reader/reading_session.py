@@ -364,7 +364,16 @@ def build_read_next(root: Path, session_id: str, batch_chapters: int = 1, chapte
             "next_allowed_action": "finalize-reading",
         }
 
-    chunks_by_chapter = group_chunks_by_chapter(fetch_chunks(root, session["book_id"]))
+    # Audit P-1: load only the target chapters' chunks instead of the whole
+    # book on every read-next call (the web auto-read loop issues one
+    # /next request per chapter).
+    chunks_by_chapter: dict[int, list[dict[str, Any]]] = {}
+    for row in target:
+        chapter_index = int(row["chapter_index"])
+        if chapter_index not in chunks_by_chapter:
+            chunks_by_chapter[chapter_index] = fetch_chunks(
+                root, session["book_id"], chapter=chapter_index
+            )
     con = open_reading_db(root)
     try:
         for row in target:

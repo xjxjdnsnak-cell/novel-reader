@@ -136,6 +136,37 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def batched_cosine_scores(query_vector: list[float], vector_json_rows: list[str]) -> list[float] | None:
+    """Cosine similarity for every row via one numpy matrix multiply.
+
+    Each row is a JSON-encoded vector (the ``vector_json`` column). Returns a
+    list of scores rounded to 6 decimals, one per input row, or ``None`` when
+    numpy is unavailable or the shapes are incompatible so the caller can
+    fall back to the pure-Python per-row :func:`cosine` path (audit P-2).
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    if not vector_json_rows:
+        return []
+    try:
+        parsed = [json.loads(item) for item in vector_json_rows]
+        dim = len(query_vector)
+        if dim == 0 or any(len(vector) != dim for vector in parsed):
+            return None
+        matrix = np.asarray(parsed, dtype=np.float32)
+        query = np.asarray(query_vector, dtype=np.float32)
+        denominators = np.linalg.norm(matrix, axis=1) * np.linalg.norm(query)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            scores = np.where(denominators > 0, matrix @ query / denominators, 0.0)
+        return [round(float(score), 6) for score in scores]
+    except (ValueError, TypeError):
+        # Malformed vectors or unexpected shapes: let the caller use the
+        # pure-Python path instead of failing the whole query.
+        return None
+
+
 def local_config_path() -> Path:
     return Path(__file__).resolve().parents[2] / ".novel-reader-local" / "config.json"
 
@@ -275,22 +306,26 @@ def semantic_search(
                 (provider, model),
             )
         )
-        scored = []
+        vector_json_rows = [row["vector_json"] for row in rows]
+        # Audit P-2: score every vector with one BLAS matrix multiply when
+        # numpy is available; otherwise keep the pure-Python per-row loop.
+        scores = batched_cosine_scores(query_vector, vector_json_rows)
+        if scores is None:
+            scores = [round(cosine(query_vector, json.loads(item)), 6) for item in vector_json_rows]
         terms = split_terms(query) or [query]
-        for row in rows:
-            vector = json.loads(row["vector_json"])
-            scored.append(
-                {
-                    "chunk_id": row["chunk_id"],
-                    "chapter_index": row["chapter_index"],
-                    "chapter_title": row["chapter_title"],
-                    "line_start": row["line_start"],
-                    "line_end": row["line_end"],
-                    "score": round(cosine(query_vector, vector), 6),
-                    "source": "embedding",
-                    "snippet": snippet(row["text"], terms, context_chars),
-                }
-            )
+        scored = [
+            {
+                "chunk_id": row["chunk_id"],
+                "chapter_index": row["chapter_index"],
+                "chapter_title": row["chapter_title"],
+                "line_start": row["line_start"],
+                "line_end": row["line_end"],
+                "score": scores[index],
+                "source": "embedding",
+                "snippet": snippet(row["text"], terms, context_chars),
+            }
+            for index, row in enumerate(rows)
+        ]
         scored.sort(key=lambda item: item["score"], reverse=True)
         return scored[:top]
     finally:
@@ -313,9 +348,15 @@ def search_book(
     con = open_db(root, book_id)
     try:
         results = []
+        fts_results: list[dict[str, Any]] = []
         if manifest.get("fts_enabled"):
-            results.extend(fts_search(con, query, top, context_chars))
-        results.extend(like_search(con, query, top * 2, context_chars))
+            fts_results = fts_search(con, query, top, context_chars)
+        results.extend(fts_results)
+        # Audit P-2: the LIKE pass is a full-table substring scan. When FTS
+        # already returned the requested number of results there is nothing
+        # left for LIKE to add, so skip it entirely.
+        if len(fts_results) < top:
+            results.extend(like_search(con, query, top * 2, context_chars))
 
         deduped: dict[str, dict[str, Any]] = {}
         for item in results:

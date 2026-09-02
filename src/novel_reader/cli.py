@@ -878,8 +878,23 @@ def percentile(values: list[int], ratio: float) -> float:
     return float(ordered[index])
 
 
+STYLE_PUNCTUATION_CHARS = "，。！？；：、“”‘’（）《》—…,.!?;:\"'()"
+SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？!?；;…])")
+DIALOGUE_QUOTE_PATTERNS = [
+    re.compile(r"“([^”]{1,240})”"),
+    re.compile(r"「([^」]{1,240})」"),
+    re.compile(r"『([^』]{1,240})』"),
+    re.compile(r'"([^"\n]{1,240})"'),
+]
+DIALOGUE_LINE_PATTERN = re.compile(r"(：|:)\s*[“\"「『]?")
+
+# Number of distinct n-grams kept by the streaming style stats accumulator;
+# the Counter is pruned back to this many entries after every chunk (audit P-3).
+STYLE_NGRAM_TOP_K = 5000
+
+
 def split_sentences(text: str) -> list[str]:
-    parts = re.split(r"(?<=[。！？!?；;…])", text)
+    parts = SENTENCE_SPLIT_PATTERN.split(text)
     return [part.strip() for part in parts if part.strip()]
 
 
@@ -888,18 +903,18 @@ def split_paragraphs(text: str) -> list[str]:
     return [re.sub(r"\s+", " ", part).strip() for part in paragraphs if part.strip()]
 
 
-def dialogue_char_count(text: str) -> int:
+def _dialogue_char_total(text: str) -> int:
+    """Unclamped dialogue character count (see :func:`dialogue_char_count`)."""
     total = 0
-    quote_patterns = [
-        r"“([^”]{1,240})”",
-        r"「([^」]{1,240})」",
-        r"『([^』]{1,240})』",
-        r'"([^"\n]{1,240})"',
-    ]
-    for pattern in quote_patterns:
-        total += sum(len(match.group(1)) for match in re.finditer(pattern, text))
-    dialogue_lines = [line.strip() for line in text.splitlines() if re.search(r"(：|:)\s*[“\"「『]?", line)]
+    for pattern in DIALOGUE_QUOTE_PATTERNS:
+        total += sum(len(match.group(1)) for match in pattern.finditer(text))
+    dialogue_lines = [line.strip() for line in text.splitlines() if DIALOGUE_LINE_PATTERN.search(line)]
     total += sum(min(len(line), 160) for line in dialogue_lines)
+    return total
+
+
+def dialogue_char_count(text: str) -> int:
+    total = _dialogue_char_total(text)
     return min(total, len(text))
 
 
@@ -947,19 +962,25 @@ def cjk_ngrams(text: str, min_len: int = 2, max_len: int = 4) -> Iterable[str]:
                 yield token
 
 
-def text_stats(text: str) -> dict[str, Any]:
-    sentences = split_sentences(text)
-    paragraphs = split_paragraphs(text)
-    sentence_lengths = [len(sentence) for sentence in sentences]
-    paragraph_lengths = [len(paragraph) for paragraph in paragraphs]
-    punctuation = Counter(ch for ch in text if ch in "，。！？；：、“”‘’（）《》—…,.!?;:\"'()")
-    chars = max(len(text), 1)
-    dialogue_chars = dialogue_char_count(text)
-    ngrams = Counter(cjk_ngrams(text))
+def _finalize_text_stats(
+    chars: int,
+    sentence_lengths: list[int],
+    paragraph_lengths: list[int],
+    punctuation: Counter,
+    dialogue_chars: int,
+    ngrams: Counter,
+) -> dict[str, Any]:
+    """Build the ``text_stats`` payload from accumulated raw statistics.
+
+    Shared by :func:`text_stats` (whole-text input) and the streaming
+    accumulator used by :func:`build_style_packet` so both produce the exact
+    same payload shape (audit P-3).
+    """
+    total_chars = max(chars, 1)
     return {
-        "chars": len(text),
-        "sentences": len(sentences),
-        "paragraphs": len(paragraphs),
+        "chars": chars,
+        "sentences": len(sentence_lengths),
+        "paragraphs": len(paragraph_lengths),
         "sentence_length": {
             "avg": round(sum(sentence_lengths) / max(len(sentence_lengths), 1), 2),
             "median": round(percentile(sentence_lengths, 0.5), 2),
@@ -972,10 +993,87 @@ def text_stats(text: str) -> dict[str, Any]:
             "median": round(percentile(paragraph_lengths, 0.5), 2),
             "p90": round(percentile(paragraph_lengths, 0.9), 2),
         },
-        "dialogue_ratio": round(dialogue_chars / chars, 3),
-        "punctuation_per_1k": {key: round(value * 1000 / chars, 2) for key, value in punctuation.most_common(12)},
+        "dialogue_ratio": round(min(dialogue_chars, chars) / total_chars, 3),
+        "punctuation_per_1k": {key: round(value * 1000 / total_chars, 2) for key, value in punctuation.most_common(12)},
         "top_terms": [{"term": term, "count": count} for term, count in ngrams.most_common(20)],
     }
+
+
+class StyleStatsAccumulator:
+    """Stream chunk texts through the style statistics one chunk at a time.
+
+    Replaces the previous ``text_stats("\\n\\n".join(...))`` over the whole
+    book, which materialized the full corpus plus every sentence/paragraph
+    list and a multi-million-entry n-gram Counter at once (audit P-3). Each
+    chunk is processed independently and only aggregated statistics are kept:
+
+    - sentence lengths: only the trailing fragment after the last sentence
+      terminal punctuation is carried to the next chunk, so the resulting
+      sentence statistics match the joined-text computation exactly;
+    - paragraph lengths, punctuation counts and n-gram Counters merge
+      additively (the ``"\\n\\n"`` separators contribute no punctuation and
+      never join CJK n-gram segments across chunks);
+    - the distinct n-gram Counter is pruned to the top ``STYLE_NGRAM_TOP_K``
+      entries after every chunk to bound memory on very large books.
+    """
+
+    def __init__(self) -> None:
+        self._chars = 0
+        self._chunk_count = 0
+        self._pending_tail = ""
+        self._sentence_lengths: list[int] = []
+        self._paragraph_lengths: list[int] = []
+        self._punctuation: Counter[str] = Counter()
+        self._dialogue_chars = 0
+        self._ngrams: Counter[str] = Counter()
+
+    def add(self, text: str) -> None:
+        if self._chunk_count:
+            # Account for the "\n\n" separator the old joined-text version
+            # implicitly counted towards ``chars``.
+            self._chars += 2
+        self._chunk_count += 1
+        self._chars += len(text)
+
+        combined = self._pending_tail + "\n\n" + text if self._pending_tail else text
+        raw_parts = SENTENCE_SPLIT_PATTERN.split(combined)
+        for part in raw_parts[:-1]:
+            stripped = part.strip()
+            if stripped:
+                self._sentence_lengths.append(len(stripped))
+        self._pending_tail = raw_parts[-1]
+
+        self._paragraph_lengths.extend(len(paragraph) for paragraph in split_paragraphs(text))
+        self._punctuation.update(ch for ch in text if ch in STYLE_PUNCTUATION_CHARS)
+        self._dialogue_chars += _dialogue_char_total(text)
+        self._ngrams.update(cjk_ngrams(text))
+        if len(self._ngrams) > STYLE_NGRAM_TOP_K:
+            self._ngrams = Counter(dict(self._ngrams.most_common(STYLE_NGRAM_TOP_K)))
+
+    def stats(self) -> dict[str, Any]:
+        sentence_lengths = list(self._sentence_lengths)
+        tail = self._pending_tail.strip()
+        if tail:
+            sentence_lengths.append(len(tail))
+        return _finalize_text_stats(
+            chars=self._chars,
+            sentence_lengths=sentence_lengths,
+            paragraph_lengths=self._paragraph_lengths,
+            punctuation=self._punctuation,
+            dialogue_chars=self._dialogue_chars,
+            ngrams=self._ngrams,
+        )
+
+
+def text_stats(text: str) -> dict[str, Any]:
+    return _finalize_text_stats(
+        chars=len(text),
+        sentence_lengths=[len(sentence) for sentence in split_sentences(text)],
+        paragraph_lengths=[len(paragraph) for paragraph in split_paragraphs(text)],
+        punctuation=Counter(ch for ch in text if ch in STYLE_PUNCTUATION_CHARS),
+        dialogue_chars=dialogue_char_count(text),
+        ngrams=Counter(cjk_ngrams(text)),
+    )
 
 
 def chunk_scene_score(text: str, scene: str) -> int:
@@ -1044,7 +1142,11 @@ def build_style_packet(root: Path, book_id: str, scene: str | None = None) -> di
     manifest = load_manifest(root, book_id)
     summaries = fetch_summary_rows(root, book_id)
     chunks = fetch_all_chunks(root, book_id)
-    corpus_text = "\n\n".join(chunk["text"] for chunk in chunks)
+    # Audit P-3: stream the corpus through the statistics chunk by chunk
+    # instead of joining the whole book into one string.
+    corpus_stats = StyleStatsAccumulator()
+    for chunk in chunks:
+        corpus_stats.add(chunk["text"])
     coverage = round(len(summaries) * 100 / max(int(manifest["chapter_count"]), 1), 2)
     return {
         "book_id": book_id,
@@ -1052,7 +1154,7 @@ def build_style_packet(root: Path, book_id: str, scene: str | None = None) -> di
         "style_purpose": "原创转写指南；分析可迁移技法，不生成直接仿冒特定作者的提示词。",
         "summary_coverage_percent": coverage,
         "scene": scene,
-        "corpus_stats": text_stats(corpus_text),
+        "corpus_stats": corpus_stats.stats(),
         "whole_book_evidence": pick_style_evidence(chunks, limit=8),
         "scene_profiles": build_scene_profiles(chunks, scene),
         "model_tasks": [
